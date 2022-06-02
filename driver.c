@@ -38,32 +38,32 @@ static struct class *cl; // Global variable for the device class
 
 struct exmap_interface;
 struct exmap_ctx {
-    size_t buffer_size;
+	size_t buffer_size;
 	size_t alloc_count;
 
-    /* Only used for accounting purposes */
-    struct user_struct		*user;
-    struct mm_struct		*mm_account;
+	/* Only used for accounting purposes */
+	struct user_struct		*user;
+	struct mm_struct		*mm_account;
 
-    /* Here is the main buffer located */
-    struct vm_area_struct *exmap_vma;
+	/* Here is the main buffer located */
+	struct vm_area_struct *exmap_vma;
 
 	/* The baking storage */
 	struct file *file_backend;
 	struct block_device *bdev;
 
-    /* Interfaces are memory mapped aread where the kernel can communicate to the user
-     */
-    int    max_interfaces;
-    struct exmap_interface *interfaces;
+	/* Interfaces are memory mapped aread where the kernel can communicate to the user
+	 */
+	int    max_interfaces;
+	struct exmap_interface *interfaces;
 
 	struct mmu_notifier mmu_notifier;
 };
 
 struct iface_count {
-    unsigned a; // alloc
-    unsigned r; // read
-    unsigned e; // evict
+	unsigned a; // alloc
+	unsigned r; // read
+	unsigned e; // evict
 	unsigned s; // steal
 	unsigned p; // steal (pages)
 };
@@ -71,10 +71,10 @@ struct iface_count {
 struct exmap_interface {
 	struct mutex		interface_lock;
 
-    /* alloc/read/evict/.. counters */
-    struct iface_count count;
-    /* default page steal target (interface) */
-    unsigned int steal_target;
+	/* alloc/read/evict/.. counters */
+	struct iface_count count;
+	/* default page steal target (interface) */
+	unsigned int steal_target;
 
 	// Page(s) that are shared with userspace
 	struct exmap_user_interface *usermem;
@@ -85,8 +85,8 @@ struct exmap_interface {
 	// Temporary storage used during operations
 	union {
 		struct {
-            // We pre-allocate as many bios, as we would have
-            // exmap_iovs to support scattered single-read pages
+			// We pre-allocate as many bios, as we would have
+			// exmap_iovs to support scattered single-read pages
 			struct bio     bio[EXMAP_USER_INTERFACE_PAGES];
 			// We pre-allocate as many bio_vecs as one exmap_iov has in length.
 			// Please note: that we would need EXMAP_PAGE_MAX_PAGES/2 structs bio
@@ -101,22 +101,22 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter);
 
 
 static inline void exmap_unaccount_mem(struct exmap_ctx *ctx,
-                                       unsigned long nr_pages) {
-    // Account for locked memory
+									   unsigned long nr_pages) {
+	// Account for locked memory
 	atomic_long_sub(nr_pages, &ctx->user->locked_vm);
 
-    // Also un-account the memory at the process
-    atomic64_sub(nr_pages, &ctx->mm_account->pinned_vm);
+	// Also un-account the memory at the process
+	atomic64_sub(nr_pages, &ctx->mm_account->pinned_vm);
 }
 
 static inline int exmap_account_mem(struct exmap_ctx *ctx,
-                                    unsigned long nr_pages)
+									unsigned long nr_pages)
 {
 	unsigned long page_limit, cur_pages, new_pages;
 
 	/* Don't allow more pages than we can safely lock */
 	page_limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
-    pr_info("page_limit: %ld/%ld (alloc: %lu)\n",
+	pr_info("page_limit: %ld/%ld (alloc: %lu)\n",
 			atomic_long_read(&ctx->user->locked_vm),
 			page_limit, nr_pages);
 
@@ -126,9 +126,9 @@ static inline int exmap_account_mem(struct exmap_ctx *ctx,
 		if (new_pages > page_limit)
 			return -ENOMEM;
 	} while (atomic_long_cmpxchg(&ctx->user->locked_vm, cur_pages,
-                                 new_pages) != cur_pages);
+								 new_pages) != cur_pages);
 
-    atomic64_add(nr_pages, &ctx->mm_account->pinned_vm);
+	atomic64_add(nr_pages, &ctx->mm_account->pinned_vm);
 
 	return 0;
 }
@@ -136,12 +136,12 @@ static inline int exmap_account_mem(struct exmap_ctx *ctx,
 void exmap_free_page_system(struct page * page) {
 //	current->rss_stat.count[mm_counter_file(page)] -= 1;
 	ClearPageReserved(page);
-    __free_pages(page, 0);
+	__free_pages(page, 0);
 }
 
 struct page* exmap_alloc_page_system(void) {
 	struct page *page = alloc_pages(GFP_NOIO | __GFP_ZERO,  0);
-    SetPageReserved(page);
+	SetPageReserved(page);
 //	current->rss_stat.count[mm_counter_file(page)] += 1;
 	return page;
 }
@@ -154,7 +154,7 @@ choose_and_lock_steal_interface(struct exmap_ctx *ctx,
 	unsigned int steal_id      = interface->steal_target;
 	struct exmap_interface *steal_it = &ctx->interfaces[steal_id];
 	unsigned steal_free_pages = steal_it->free_pages.count;
-    unsigned int random[2] = {0, 0};
+	unsigned int random[2] = {0, 0};
 
 	// 1. We try to steal from our last interface
 	if (steal_free_pages > desired_count) {
@@ -205,7 +205,7 @@ free_pages_move(struct free_pages *src, struct free_pages *dst,
 		return src_count;
 	}
 
-    // We steal only a "few" oages
+	// We steal only a "few" oages
 
 	list_ptr  = &src->list;
 	for (src_count = 0; src_count < max_pages; src_count++) {
@@ -348,7 +348,7 @@ void exmap_free_pages(struct exmap_ctx *ctx,
 }
 
 static void vm_close(struct vm_area_struct *vma) {
-    struct exmap_ctx *ctx = vma->vm_private_data;
+	struct exmap_ctx *ctx = vma->vm_private_data;
 	unsigned long freed_pages = 0;
 	struct page *page, *npage;
 	int idx;
@@ -368,7 +368,7 @@ static void vm_close(struct vm_area_struct *vma) {
 	}
 
 	// Raise the locked_vm_pages again
-    exmap_unaccount_mem(ctx, ctx->buffer_size);
+	exmap_unaccount_mem(ctx, ctx->buffer_size);
 
 	pr_info("vm_close:  freed: %lu, unlock=%ld\n",
 			freed_pages, ctx->buffer_size);
@@ -376,8 +376,8 @@ static void vm_close(struct vm_area_struct *vma) {
 
 /* First page access. */
 static vm_fault_t vm_fault(struct vm_fault *vmf) {
-    pr_info("vm_fault: off=%ld\n", vmf->pgoff);
-    // We forbid the implicit page fault interface
+	pr_info("vm_fault: off=%ld\n", vmf->pgoff);
+	// We forbid the implicit page fault interface
 	return VM_FAULT_SIGSEGV;
 }
 
@@ -432,56 +432,56 @@ static int exmap_mmu_notifier(struct exmap_ctx *ctx)
 }
 
 static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
-    struct exmap_ctx *ctx = file->private_data;
-    loff_t offset = vma->vm_pgoff << PAGE_SHIFT;
-    size_t sz = vma->vm_end - vma->vm_start;
-    unsigned long pfn;
+	struct exmap_ctx *ctx = file->private_data;
+	loff_t offset = vma->vm_pgoff << PAGE_SHIFT;
+	size_t sz = vma->vm_end - vma->vm_start;
+	unsigned long pfn;
 
-    if (offset == EXMAP_OFF_EXMAP) {
-        // The exmap itsel can only be mapped once.
-        if (ctx->exmap_vma) {
-            return -EBUSY;
-        }
+	if (offset == EXMAP_OFF_EXMAP) {
+		// The exmap itsel can only be mapped once.
+		if (ctx->exmap_vma) {
+			return -EBUSY;
+		}
 
-        ctx->exmap_vma = vma;
-        vma->vm_ops   = &vm_ops;
-        vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP | VM_NOHUGEPAGE | VM_DONTCOPY;
-        vma->vm_flags |= VM_MIXEDMAP; // required for vm_insert_page
-        vma->vm_private_data = ctx;
-        vm_open(vma);
-    } else if (offset >= EXMAP_OFF_INTERFACE_BASE && offset <= EXMAP_OFF_INTERFACE_MAX) {
-        int idx = (offset - EXMAP_OFF_INTERFACE_BASE) >> PAGE_SHIFT;
+		ctx->exmap_vma = vma;
+		vma->vm_ops   = &vm_ops;
+		vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP | VM_NOHUGEPAGE | VM_DONTCOPY;
+		vma->vm_flags |= VM_MIXEDMAP; // required for vm_insert_page
+		vma->vm_private_data = ctx;
+		vm_open(vma);
+	} else if (offset >= EXMAP_OFF_INTERFACE_BASE && offset <= EXMAP_OFF_INTERFACE_MAX) {
+		int idx = (offset - EXMAP_OFF_INTERFACE_BASE) >> PAGE_SHIFT;
 		struct exmap_interface *interface;
 
-        if (!ctx->interfaces || idx > ctx->max_interfaces || idx < 0)
-            return -ENXIO;
+		if (!ctx->interfaces || idx > ctx->max_interfaces || idx < 0)
+			return -ENXIO;
 
-        if (sz != PAGE_SIZE)
-            return -EINVAL;
+		if (sz != PAGE_SIZE)
+			return -EINVAL;
 
-        interface = (&ctx->interfaces[idx]);
+		interface = (&ctx->interfaces[idx]);
 		// pr_info("mmap interface[%d]: 0x%lx size=%d\n", idx, interface->usermem, sz);
 
 
 		// Map the struct exmap_user_interface into the userspace
-        pfn = virt_to_phys(interface->usermem) >> PAGE_SHIFT;
-        return remap_pfn_range(vma, vma->vm_start, pfn, sz, vma->vm_page_prot);
-    } else {
+		pfn = virt_to_phys(interface->usermem) >> PAGE_SHIFT;
+		return remap_pfn_range(vma, vma->vm_start, pfn, sz, vma->vm_page_prot);
+	} else {
 		return -EINVAL;
 	}
 	return 0;
 }
 
 static void exmap_mem_free(void *ptr, size_t size) {
-    struct page *page;
-    page = virt_to_head_page(ptr);
-    __free_pages(page, get_order(size));
+	struct page *page;
+	page = virt_to_head_page(ptr);
+	__free_pages(page, get_order(size));
 }
 
 static void *exmap_mem_alloc(size_t size)
 {
-    gfp_t gfp_flags = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP |
-        __GFP_NORETRY | __GFP_ACCOUNT;
+	gfp_t gfp_flags = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP |
+		__GFP_NORETRY | __GFP_ACCOUNT;
 
 	return (void *) __get_free_pages(gfp_flags, get_order(size));
 }
@@ -495,24 +495,24 @@ static const struct address_space_operations dev_exmap_aops = {
 
 static int open(struct inode *inode, struct file *filp) {
 	int rc = 0;
-    // Open does always
+	// Open does always
 	struct exmap_ctx *ctx;
 	ctx = kmalloc(sizeof(struct exmap_ctx), GFP_KERNEL);
-    memset(ctx, 0, sizeof(struct exmap_ctx));
+	memset(ctx, 0, sizeof(struct exmap_ctx));
 
-    // Get mmstruct and current user for accounting purposes
-    mmgrab(current->mm);
+	// Get mmstruct and current user for accounting purposes
+	mmgrab(current->mm);
 
 	rc = exmap_mmu_notifier(ctx);
 	if (rc) goto free_ctx;
 
 	ctx->mm_account = current->mm;
-    ctx->user = get_uid(current_user());
+	ctx->user = get_uid(current_user());
 
-    ctx->max_interfaces = 0;
-    ctx->interfaces = NULL;
+	ctx->max_interfaces = 0;
+	ctx->interfaces = NULL;
 
-    filp->private_data = ctx;
+	filp->private_data = ctx;
 
 	// Make the character device O_DIRECT
 	inode->i_mapping->a_ops = &dev_exmap_aops;
@@ -528,12 +528,12 @@ free_ctx:
 static int release(struct inode *inode, struct file *filp) {
 	struct exmap_ctx *ctx = filp->private_data;
 
-    if (ctx->mm_account) {
+	if (ctx->mm_account) {
 		mmdrop(ctx->mm_account);
 		ctx->mm_account = NULL;
 	}
 
-    if (ctx->interfaces) {
+	if (ctx->interfaces) {
 		int idx;
 
 		for (idx = 0; idx < ctx->max_interfaces; idx++) {
@@ -542,7 +542,7 @@ static int release(struct inode *inode, struct file *filp) {
 						   sizeof(struct exmap_user_interface));
 		}
 		kvfree(ctx->interfaces);
-    }
+	}
 
 	pr_info("release\n");
 
@@ -643,12 +643,12 @@ static inline bool bio_full(struct bio *bio, unsigned len)
 int
 exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	int iface = params->interface;
-    struct exmap_interface *interface  = &(ctx->interfaces[iface]);
-    struct vm_area_struct  *vma       = ctx->exmap_vma;
+	struct exmap_interface *interface  = &(ctx->interfaces[iface]);
+	struct vm_area_struct  *vma       = ctx->exmap_vma;
 	unsigned int  iov_len             = params->iov_len;
 	unsigned long nr_pages_alloced    = 0;
 	FREE_PAGES(free_pages);
-    int idx, rc = 0, failed = 0;
+	int idx, rc = 0, failed = 0;
 	struct exmap_alloc_ctx alloc_ctx = {
 		.ctx = ctx,
 		.interface = interface,
@@ -672,7 +672,7 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	// Do we really need this lock?
 	mmap_read_lock(vma->vm_mm);
 
-    for (idx = 0; idx < iov_len; idx++) {
+	for (idx = 0; idx < iov_len; idx++) {
 		unsigned long uaddr;
 		struct exmap_iov ret, vec;
 		unsigned free_pages_before;
@@ -681,9 +681,9 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 		uaddr = vma->vm_start + (vec.page << PAGE_SHIFT);
 		alloc_ctx.iov_cur = &vec;
 
- 		// pr_info("alloc[%d]: off=%llu, len=%d", iface, (uint64_t) vec.page, (int) vec.len);
+		// pr_info("alloc[%d]: off=%llu, len=%d", iface, (uint64_t) vec.page, (int) vec.len);
 
-        // Allocate more memory for ALLOC
+		// Allocate more memory for ALLOC
 		if (free_pages.count < vec.len) {
 				rc = exmap_alloc_pages(ctx, interface, &free_pages,
 									   vec.len - free_pages.count);
@@ -695,7 +695,7 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 		}
 
 		free_pages_before = free_pages.count;
-        rc = exmap_insert_pages(vma, uaddr, vec.len, &free_pages,
+		rc = exmap_insert_pages(vma, uaddr, vec.len, &free_pages,
 								NULL, &alloc_ctx);
 		if (rc < 0) failed++;
 
@@ -703,12 +703,12 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 		ret.pages = (int)(free_pages_before - free_pages.count);
 		nr_pages_alloced += ret.pages;
 
-        exmap_debug("alloc: %llu+%d => rc=%d, used=%d",
+		exmap_debug("alloc: %llu+%d => rc=%d, used=%d",
 					(uint64_t) vec.page, (int)vec.len,
 					(int)ret.res, (int) ret.pages);
 
 		WRITE_ONCE(interface->usermem->iov[idx], ret);
-    }
+	}
 	// free remaining pages into the local interface
 	// pr_info("Free %d (nr_pages_alloced %lu)\n", free_pages.count, nr_pages_alloced);
 	exmap_free_pages(ctx, interface, &free_pages);
@@ -719,16 +719,16 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	// Update the RSS counter once!
 	// add_mm_counter(vma->vm_mm, MM_FILEPAGES, nr_pages_alloced);
 
-    mmap_read_unlock(vma->vm_mm);
+	mmap_read_unlock(vma->vm_mm);
 
-    return failed;
+	return failed;
 }
 
 int
 exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	int iface = params->interface;
-    struct exmap_interface *interface = &(ctx->interfaces[iface]);
-    struct vm_area_struct  *vma       = ctx->exmap_vma;
+	struct exmap_interface *interface = &(ctx->interfaces[iface]);
+	struct vm_area_struct  *vma       = ctx->exmap_vma;
 	unsigned int  iov_len             = params->iov_len;
 	int idx, rc = 0, failed = 0;
 	FREE_PAGES(free_pages);
@@ -737,11 +737,11 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 		return failed;
 
 	// Do we really need this lock?
-    mmap_read_lock(vma->vm_mm);
+	mmap_read_lock(vma->vm_mm);
 
-    for (idx = 0; idx < iov_len; idx++) {
-        struct exmap_iov vec = READ_ONCE(interface->usermem->iov[idx]);
-        unsigned long uaddr = vma->vm_start + (vec.page << PAGE_SHIFT);
+	for (idx = 0; idx < iov_len; idx++) {
+		struct exmap_iov vec = READ_ONCE(interface->usermem->iov[idx]);
+		unsigned long uaddr = vma->vm_start + (vec.page << PAGE_SHIFT);
 		unsigned long old_free_count = free_pages.count;
 
 		/* FIXME what if vec.len == 0 */
@@ -759,10 +759,10 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 		vec.res = rc;
 		vec.pages = free_pages.count - old_free_count;
 
-        interface->count.e += vec.pages;
+		interface->count.e += vec.pages;
 
 		WRITE_ONCE(interface->usermem->iov[idx], vec);
-    }
+	}
 
 	// Flush the TLB of this CPU!
 	// __flush_tlb_all(); 	// Please note: This is no shootdown!
@@ -773,9 +773,9 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 
 	exmap_free_pages(ctx, interface, &free_pages);
 
-    mmap_read_unlock(vma->vm_mm);
+	mmap_read_unlock(vma->vm_mm);
 
-    return failed;
+	return failed;
 }
 
 typedef int (*exmap_action_fptr)(struct exmap_ctx *, struct exmap_action_params *);
@@ -787,28 +787,28 @@ static exmap_action_fptr exmap_action_array[] = {
 
 static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 {
-    struct exmap_ioctl_setup  setup;
-    struct exmap_action_params action;
-    struct exmap_ctx *ctx;
-    struct exmap_interface *interface;
-    int rc = 0, idx;
+	struct exmap_ioctl_setup  setup;
+	struct exmap_action_params action;
+	struct exmap_ctx *ctx;
+	struct exmap_interface *interface;
+	int rc = 0, idx;
 	gfp_t gfp_flags;
 
-    ctx = (struct exmap_ctx*) file->private_data;
+	ctx = (struct exmap_ctx*) file->private_data;
 
-    switch(cmd) {
-    case EXMAP_IOCTL_SETUP:
-        if( copy_from_user(&setup, (struct exmap_ioctl_setup *) arg,
-                           sizeof(struct exmap_ioctl_setup)) )
-            return -EFAULT;
+	switch(cmd) {
+	case EXMAP_IOCTL_SETUP:
+		if( copy_from_user(&setup, (struct exmap_ioctl_setup *) arg,
+						   sizeof(struct exmap_ioctl_setup)) )
+			return -EFAULT;
 
-        /* process data and execute command */
-        pr_info("setup.buffer_size = %ld", setup.buffer_size);
+		/* process data and execute command */
+		pr_info("setup.buffer_size = %ld", setup.buffer_size);
 
-        // Interfaces can only be initialized once
+		// Interfaces can only be initialized once
 		pr_info("setup.interfaces = %p", ctx->interfaces);
-        if (ctx->interfaces)
-            return -EBUSY;
+		if (ctx->interfaces)
+			return -EBUSY;
 
 		if (setup.fd >= 0) {
 			struct file *file = fget(setup.fd);
@@ -845,24 +845,24 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			}
 		}
 
-        // // Account for the locked memory
-        // rc = exmap_account_mem(ctx, (setup.buffer_size - ctx->buffer_size));
-        // if (rc < 0) {
+		// // Account for the locked memory
+		// rc = exmap_account_mem(ctx, (setup.buffer_size - ctx->buffer_size));
+		// if (rc < 0) {
 		// 	pr_info("Cannot account for memory. rlimit exceeded");
-        //     return rc;
+		//     return rc;
 		// }
 		ctx->buffer_size += setup.buffer_size;
 
-        if (setup.max_interfaces > 256)
-            return -EINVAL;
+		if (setup.max_interfaces > 256)
+			return -EINVAL;
 
-        ctx->max_interfaces = setup.max_interfaces;
+		ctx->max_interfaces = setup.max_interfaces;
 		gfp_flags = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP |
 			__GFP_NORETRY | __GFP_ACCOUNT;
-        ctx->interfaces     = kvzalloc(setup.max_interfaces * sizeof(struct exmap_interface), gfp_flags);
+		ctx->interfaces     = kvzalloc(setup.max_interfaces * sizeof(struct exmap_interface), gfp_flags);
 		if (!ctx->interfaces) {
 			pr_info("interfaces failed");
-            return -ENOMEM;
+			return -ENOMEM;
 		}
 
 		for (idx = 0; idx < ctx->max_interfaces; idx++) {
@@ -905,32 +905,32 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 
 		pr_info("Allocated %ld pages\n", ctx->alloc_count);
 
-        break;
+		break;
 
-    case EXMAP_IOCTL_ACTION:
+	case EXMAP_IOCTL_ACTION:
 		if (unlikely(ctx->interfaces == NULL))
-            return -EBADF;
+			return -EBADF;
 
-        if( copy_from_user(&action, (struct exmap_action_params *) arg,
-                           sizeof(struct exmap_action_params)) )
-            return -EFAULT;
+		if( copy_from_user(&action, (struct exmap_action_params *) arg,
+						   sizeof(struct exmap_action_params)) )
+			return -EFAULT;
 
-        if (unlikely(action.interface >= ctx->max_interfaces))
-            return -EINVAL;
+		if (unlikely(action.interface >= ctx->max_interfaces))
+			return -EINVAL;
 
 		if (action.opcode > ARRAY_SIZE(exmap_action_array)
 			|| !exmap_action_array[action.opcode])
-            return -EINVAL;
+			return -EINVAL;
 
 		mutex_lock(&(ctx->interfaces[action.interface].interface_lock));
 		rc = exmap_action_array[action.opcode](ctx, &action);
 		mutex_unlock(&(ctx->interfaces[action.interface].interface_lock));
-        break;
-    default:
-        return -EINVAL;
-    }
+		break;
+	default:
+		return -EINVAL;
+	}
 
-    return rc;
+	return rc;
 }
 
 ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
@@ -1029,7 +1029,7 @@ static const struct file_operations fops = {
 	.open = open,
 	.read_iter = exmap_read_iter,
 	.release = release,
-    .unlocked_ioctl = exmap_ioctl
+	.unlocked_ioctl = exmap_ioctl
 };
 
 static int dev_uevent_perms(struct device *dev, struct kobj_uevent_env *env) {
@@ -1037,41 +1037,41 @@ static int dev_uevent_perms(struct device *dev, struct kobj_uevent_env *env) {
 }
 
 static int exmap_init_module(void) {
-    printk(KERN_INFO "exmap registered");
+	printk(KERN_INFO "exmap registered");
 
 	if (exmap_acquire_ksyms())
 		goto out;
 
-    if (alloc_chrdev_region(&first, 0, 1, "exmap") < 0)
-        goto out;
-    if ((cl = class_create(THIS_MODULE, "exmap")) == NULL)
-        goto out_unregister_chrdev_region;
-    cl->dev_uevent = dev_uevent_perms;
-    if (device_create(cl, NULL, first, NULL, "exmap") == NULL)
-        goto out_class_destroy;
+	if (alloc_chrdev_region(&first, 0, 1, "exmap") < 0)
+		goto out;
+	if ((cl = class_create(THIS_MODULE, "exmap")) == NULL)
+		goto out_unregister_chrdev_region;
+	cl->dev_uevent = dev_uevent_perms;
+	if (device_create(cl, NULL, first, NULL, "exmap") == NULL)
+		goto out_class_destroy;
 
-    cdev_init(&cdev, &fops);
-    if (cdev_add(&cdev, first, 1) == -1)
-        goto out_device_destroy;
+	cdev_init(&cdev, &fops);
+	if (cdev_add(&cdev, first, 1) == -1)
+		goto out_device_destroy;
 
-    return 0;
+	return 0;
 
  out_device_destroy:
-    device_destroy(cl, first);
+	device_destroy(cl, first);
  out_class_destroy:
-    class_destroy(cl);
+	class_destroy(cl);
  out_unregister_chrdev_region:
-    unregister_chrdev_region(first, 1);
+	unregister_chrdev_region(first, 1);
  out:
-    return -1;
+	return -1;
 }
 
 static void exmap_cleanup_module(void) {
-    cdev_del(&cdev);
-    device_destroy(cl, first);
-    class_destroy(cl);
-    unregister_chrdev_region(first, 1);
-    printk(KERN_INFO "Alvida: ofcd unregistered");
+	cdev_del(&cdev);
+	device_destroy(cl, first);
+	class_destroy(cl);
+	unregister_chrdev_region(first, 1);
+	printk(KERN_INFO "Alvida: ofcd unregistered");
 }
 
 module_init(exmap_init_module)

@@ -24,7 +24,7 @@ struct exmap_alloc_ctx;
 typedef int (*exmap_insert_callback)(struct exmap_alloc_ctx *, unsigned long, struct page *);
 
 int exmap_insert_pages(struct vm_area_struct *vma,
-                       unsigned long addr, unsigned long num_pages,
+					   unsigned long addr, unsigned long num_pages,
 					   struct free_pages *pages,
 					   exmap_insert_callback cb, struct exmap_alloc_ctx *data);
 

@@ -5,9 +5,9 @@
 #define STATIC_ASSERT(COND,MSG) typedef char static_assertion_##MSG[(!!(COND))*2-1]
 
 struct exmap_ioctl_setup {
-    int    fd;
-    int    max_interfaces;
-    size_t buffer_size;
+	int    fd;
+	int    max_interfaces;
+	size_t buffer_size;
 	uint64_t flags;
 };
 
@@ -19,12 +19,12 @@ struct exmap_ioctl_setup {
 #define EXMAP_PAGE_MAX_PAGES (1 << EXMAP_PAGE_LEN_BITS)
 
 struct exmap_iov {
-    union {
-        uint64_t value;
-        struct {
-            uint64_t page   : 64 - EXMAP_PAGE_LEN_BITS;
-            uint64_t len    : EXMAP_PAGE_LEN_BITS;
-        };
+	union {
+		uint64_t value;
+		struct {
+			uint64_t page   : 64 - EXMAP_PAGE_LEN_BITS;
+			uint64_t len    : EXMAP_PAGE_LEN_BITS;
+		};
 		struct {
 			int32_t   res;
 			int16_t   pages;
@@ -34,7 +34,7 @@ struct exmap_iov {
 			int16_t robber;
 			uint32_t count;
 		};
-    };
+	};
 };
 
 #define EXMAP_USER_INTERFACE_PAGES 512
@@ -42,9 +42,9 @@ struct exmap_iov {
 STATIC_ASSERT(sizeof(struct exmap_iov) == 8, exmap_iov);
 
 struct exmap_user_interface {
-    union {
-        struct exmap_iov iov[EXMAP_USER_INTERFACE_PAGES];
-    };
+	union {
+		struct exmap_iov iov[EXMAP_USER_INTERFACE_PAGES];
+	};
 };
 
 STATIC_ASSERT(sizeof(struct exmap_user_interface) == 4096, exmap_user_interface);
@@ -64,7 +64,7 @@ enum exmap_flags {
 typedef enum exmap_flags exmap_flags;
 
 struct exmap_action_params {
-    uint16_t interface;
+	uint16_t interface;
 	uint16_t iov_len;
 	uint16_t opcode; // exmap_opcode
 	uint64_t flags;  // exmap_flags

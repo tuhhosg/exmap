@@ -7,7 +7,7 @@
 #include <linux/kprobes.h>
 
 static struct kprobe kp = {
-    .symbol_name = "kallsyms_lookup_name"
+	.symbol_name = "kallsyms_lookup_name"
 };
 
 /* Auxiliary function pointers here */
@@ -25,14 +25,14 @@ int exmap_acquire_ksyms(void)
 {
 	kallsyms_lookup_name_t kallsyms_lookup_name;
 
-    /*
-     * From kernel 5.7.0 onwards, kallsyms_lookup_name
-     * is no longer exported by default. This workaround
-     * uses kprobes to find the address of the function.
+	/*
+	 * From kernel 5.7.0 onwards, kallsyms_lookup_name
+	 * is no longer exported by default. This workaround
+	 * uses kprobes to find the address of the function.
 	 */
-    register_kprobe(&kp);
-    kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
-    unregister_kprobe(&kp);
+	register_kprobe(&kp);
+	kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
+	unregister_kprobe(&kp);
 	/* 
 	 * Try to find all necessary symbols,
 	 * return -1 if any lookup fails

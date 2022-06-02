@@ -23,55 +23,55 @@
  */
 static inline pgtable_t exmap_pte_alloc_one(struct mm_struct *mm)
 {
-    struct page *pte;
+	struct page *pte;
 
-    pte = alloc_page(GFP_PGTABLE_USER);
-    if (!pte)
-        return NULL;
-    if (!pgtable_pte_page_ctor(pte)) {
-        __free_page(pte);
-        return NULL;
-    }
+	pte = alloc_page(GFP_PGTABLE_USER);
+	if (!pte)
+		return NULL;
+	if (!pgtable_pte_page_ctor(pte)) {
+		__free_page(pte);
+		return NULL;
+	}
 
-    return pte;
+	return pte;
 }
 
 void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte)
 {
-    spinlock_t *ptl = pmd_lock(mm, pmd);
+	spinlock_t *ptl = pmd_lock(mm, pmd);
 
-    if (likely(pmd_none(*pmd))) {   /* Has another populated it ? */
-        mm_inc_nr_ptes(mm);
-        /*
-         * Ensure all pte setup (eg. pte page lock and page clearing) are
-         * visible before the pte is made visible to other CPUs by being
-         * put into page tables.
-         *
-         * The other side of the story is the pointer chasing in the page
-         * table walking code (when walking the page table without locking;
-         * ie. most of the time). Fortunately, these data accesses consist
-         * of a chain of data-dependent loads, meaning most CPUs (alpha
-         * being the notable exception) will already guarantee loads are
-         * seen in-order. See the alpha page table accessors for the
-         * smp_rmb() barriers in page table walking code.
-         */
-        smp_wmb(); /* Could be smp_wmb__xxx(before|after)_spin_lock */
-        pmd_populate(mm, pmd, *pte);
-        *pte = NULL;
-    }
-    spin_unlock(ptl);
+	if (likely(pmd_none(*pmd))) {   /* Has another populated it ? */
+		mm_inc_nr_ptes(mm);
+		/*
+		 * Ensure all pte setup (eg. pte page lock and page clearing) are
+		 * visible before the pte is made visible to other CPUs by being
+		 * put into page tables.
+		 *
+		 * The other side of the story is the pointer chasing in the page
+		 * table walking code (when walking the page table without locking;
+		 * ie. most of the time). Fortunately, these data accesses consist
+		 * of a chain of data-dependent loads, meaning most CPUs (alpha
+		 * being the notable exception) will already guarantee loads are
+		 * seen in-order. See the alpha page table accessors for the
+		 * smp_rmb() barriers in page table walking code.
+		 */
+		smp_wmb(); /* Could be smp_wmb__xxx(before|after)_spin_lock */
+		pmd_populate(mm, pmd, *pte);
+		*pte = NULL;
+	}
+	spin_unlock(ptl);
 }
 
 int exmap__pte_alloc(struct mm_struct *mm, pmd_t *pmd)
 {
-    pgtable_t new = exmap_pte_alloc_one(mm);
-    if (!new)
-        return -ENOMEM;
+	pgtable_t new = exmap_pte_alloc_one(mm);
+	if (!new)
+		return -ENOMEM;
 
-    pmd_install(mm, pmd, &new);
-    if (new)
-        pte_free(mm, new);
-    return 0;
+	pmd_install(mm, pmd, &new);
+	if (new)
+		pte_free(mm, new);
+	return 0;
 }
 
 #define exmap_pte_alloc(mm, pmd) (unlikely(pmd_none(*(pmd))) && exmap__pte_alloc(mm, pmd))
@@ -89,16 +89,16 @@ int exmap__pte_alloc(struct mm_struct *mm, pmd_t *pmd)
  */
 static inline pmd_t *exmap_pmd_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
-    struct page *page;
+	struct page *page;
 
-    page = alloc_pages(GFP_PGTABLE_USER, 0);
-    if (!page)
-        return NULL;
-    if (!pgtable_pmd_page_ctor(page)) {
-        __free_pages(page, 0);
-        return NULL;
-    }
-    return (pmd_t *)page_address(page);
+	page = alloc_pages(GFP_PGTABLE_USER, 0);
+	if (!page)
+		return NULL;
+	if (!pgtable_pmd_page_ctor(page)) {
+		__free_pages(page, 0);
+		return NULL;
+	}
+	return (pmd_t *)page_address(page);
 }
 
 /**
@@ -112,7 +112,7 @@ static inline pmd_t *exmap_pmd_alloc_one(struct mm_struct *mm, unsigned long add
  */
 static inline pud_t *exmap_pud_alloc_one(struct mm_struct *mm, unsigned long addr)
 {
-    return (pud_t *)get_zeroed_page(GFP_PGTABLE_USER);
+	return (pud_t *)get_zeroed_page(GFP_PGTABLE_USER);
 }
 
 static inline p4d_t *exmap_p4d_alloc_one(struct mm_struct *mm, unsigned long addr)
@@ -129,20 +129,20 @@ static
 int exmap_default_p4d_alloc(struct mm_struct *mm, pgd_t *pgd, unsigned long address)
 {
 #ifndef __PAGETABLE_P4D_FOLDED
-    p4d_t *new = exmap_p4d_alloc_one(mm, address);
-    if (!new)
-        return -ENOMEM;
+	p4d_t *new = exmap_p4d_alloc_one(mm, address);
+	if (!new)
+		return -ENOMEM;
 
-    spin_lock(&mm->page_table_lock);
-    if (pgd_present(*pgd)) {    /* Another has populated it */
-        p4d_free(mm, new);
-    } else {
-        smp_wmb(); /* See comment in pmd_install() */
-        pgd_populate(mm, pgd, new);
-    }
-    spin_unlock(&mm->page_table_lock);
+	spin_lock(&mm->page_table_lock);
+	if (pgd_present(*pgd)) {    /* Another has populated it */
+		p4d_free(mm, new);
+	} else {
+		smp_wmb(); /* See comment in pmd_install() */
+		pgd_populate(mm, pgd, new);
+	}
+	spin_unlock(&mm->page_table_lock);
 #endif /* __PAGETABLE_P4D_FOLDED */
-    return 0;
+	return 0;
 }
 
 
@@ -154,20 +154,20 @@ static
 int exmap_default_pud_alloc(struct mm_struct *mm, p4d_t *p4d, unsigned long address)
 {
 #ifndef __PAGETABLE_PUD_FOLDED
-    pud_t *new = exmap_pud_alloc_one(mm, address);
-    if (!new)
-        return -ENOMEM;
+	pud_t *new = exmap_pud_alloc_one(mm, address);
+	if (!new)
+		return -ENOMEM;
 
-    spin_lock(&mm->page_table_lock);
-    if (!p4d_present(*p4d)) {
-        mm_inc_nr_puds(mm);
-        smp_wmb(); /* See comment in pmd_install() */
-        p4d_populate(mm, p4d, new);
-    } else  /* Another has populated it */
-        pud_free(mm, new);
-    spin_unlock(&mm->page_table_lock);
+	spin_lock(&mm->page_table_lock);
+	if (!p4d_present(*p4d)) {
+		mm_inc_nr_puds(mm);
+		smp_wmb(); /* See comment in pmd_install() */
+		p4d_populate(mm, p4d, new);
+	} else  /* Another has populated it */
+		pud_free(mm, new);
+	spin_unlock(&mm->page_table_lock);
 #endif /* __PAGETABLE_PUD_FOLDED */
-    return 0;
+	return 0;
 }
 
 
@@ -180,22 +180,22 @@ static
 int exmap_default_pmd_alloc(struct mm_struct *mm, pud_t *pud, unsigned long address)
 {
 #ifndef __PAGETABLE_PMD_FOLDED
-    spinlock_t *ptl;
-    pmd_t *new = exmap_pmd_alloc_one(mm, address);
-    if (!new)
-        return -ENOMEM;
+	spinlock_t *ptl;
+	pmd_t *new = exmap_pmd_alloc_one(mm, address);
+	if (!new)
+		return -ENOMEM;
 
-    ptl = pud_lock(mm, pud);
-    if (!pud_present(*pud)) {
-        mm_inc_nr_pmds(mm);
-        smp_wmb(); /* See comment in pmd_install() */
-        pud_populate(mm, pud, new);
-    } else {    /* Another has populated it */
-        pmd_free(mm, new);
-    }
-    spin_unlock(ptl);
+	ptl = pud_lock(mm, pud);
+	if (!pud_present(*pud)) {
+		mm_inc_nr_pmds(mm);
+		smp_wmb(); /* See comment in pmd_install() */
+		pud_populate(mm, pud, new);
+	} else {    /* Another has populated it */
+		pmd_free(mm, new);
+	}
+	spin_unlock(ptl);
 #endif /* __PAGETABLE_PMD_FOLDED */
-    return 0;
+	return 0;
 }
 
 
@@ -204,66 +204,66 @@ static inline
 p4d_t * exmap_p4d_offset_alloc(struct mm_struct *mm, pgd_t *pgd,
 							   unsigned long address)
 {
-    if (mm_p4d_folded(mm))
-        p4d_offset(pgd, address);
+	if (mm_p4d_folded(mm))
+		p4d_offset(pgd, address);
 
-    return (unlikely(pgd_none(*pgd)) && exmap_default_p4d_alloc(mm, pgd, address)) ?
-        NULL : p4d_offset(pgd, address);
+	return (unlikely(pgd_none(*pgd)) && exmap_default_p4d_alloc(mm, pgd, address)) ?
+		NULL : p4d_offset(pgd, address);
 }
 
 static inline
 pud_t * exmap_pud_offset_alloc(struct mm_struct *mm, p4d_t *p4d,
 							   unsigned long address)
 {
-    if (mm_pud_folded(mm))
-        return pud_offset(p4d, address);
+	if (mm_pud_folded(mm))
+		return pud_offset(p4d, address);
 
-    return (unlikely(p4d_none(*p4d)) && exmap_default_pud_alloc(mm, p4d, address)) ?
-        NULL : pud_offset(p4d, address);
+	return (unlikely(p4d_none(*p4d)) && exmap_default_pud_alloc(mm, p4d, address)) ?
+		NULL : pud_offset(p4d, address);
 }
 
 static inline
 pmd_t * exmap_pmd_offset_alloc(
-                        struct mm_struct *mm, pud_t *pud,
-                        unsigned long address)
+						struct mm_struct *mm, pud_t *pud,
+						unsigned long address)
 {
-    if (mm_pmd_folded(mm))
-        return pmd_offset(pud, address);
+	if (mm_pmd_folded(mm))
+		return pmd_offset(pud, address);
 
-    return (unlikely(pud_none(*pud)) && exmap_default_pmd_alloc(mm, pud, address))?
-        NULL: pmd_offset(pud, address);
+	return (unlikely(pud_none(*pud)) && exmap_default_pmd_alloc(mm, pud, address))?
+		NULL: pmd_offset(pud, address);
 }
 
 
 static pmd_t *walk_to_pmd(struct mm_struct *mm, unsigned long addr)
 {
-    pgd_t *pgd;
-    p4d_t *p4d;
-    pud_t *pud;
-    pmd_t *pmd;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
 
-    pgd = pgd_offset(mm, addr);
-    // pr_info("pgd: %p", pgd);
+	pgd = pgd_offset(mm, addr);
+	// pr_info("pgd: %p", pgd);
 
-    p4d = exmap_p4d_offset_alloc(mm, pgd, addr);
-    if (!p4d)
-        return NULL;
-    // pr_info("p4d: %p", pgd);
+	p4d = exmap_p4d_offset_alloc(mm, pgd, addr);
+	if (!p4d)
+		return NULL;
+	// pr_info("p4d: %p", pgd);
 
-    pud = exmap_pud_offset_alloc(mm, p4d, addr);
-    if (!pud)
-        return NULL;
+	pud = exmap_pud_offset_alloc(mm, p4d, addr);
+	if (!pud)
+		return NULL;
 
-    // pr_info("pud: %p", pud);
+	// pr_info("pud: %p", pud);
 
-    pmd = exmap_pmd_offset_alloc(mm, pud, addr);
-    if (!pmd)
-        return NULL;
+	pmd = exmap_pmd_offset_alloc(mm, pud, addr);
+	if (!pmd)
+		return NULL;
 
-    // pr_info("pmd: %p", pmd);
+	// pr_info("pmd: %p", pmd);
 
-    VM_BUG_ON(pmd_trans_huge(*pmd));
-    return pmd;
+	VM_BUG_ON(pmd_trans_huge(*pmd));
+	return pmd;
 }
 
 // For add_mm_counter to work inside a module
@@ -272,7 +272,7 @@ void mm_trace_rss_stat(struct mm_struct *mm, int member, long count)
 }
 
 static int insert_page_into_pte_locked(struct mm_struct *mm, pte_t *pte,
-                                       unsigned long addr, struct page *page, pgprot_t prot)
+									   unsigned long addr, struct page *page, pgprot_t prot)
 {
 #ifdef MAPCOUNT
 	unsigned int mapcount;
@@ -280,41 +280,41 @@ static int insert_page_into_pte_locked(struct mm_struct *mm, pte_t *pte,
 	/* pr_info("pte_none = %d, page dirty = %d, pte = %p, page = %p", !(pte->pte & ~(_PAGE_DIRTY | _PAGE_ACCESSED)), PageDirty(page), pte, page); */
 	/* NOTE this causes EBUSY in insert_pages */
 	if (!pte_none(*pte))
-        return -EBUSY;
-    /* Ok, finally just insert the thing.. */
+		return -EBUSY;
+	/* Ok, finally just insert the thing.. */
 
-    // add_mm_counter_fast(mm, mm_counter_file(page), 1);
+	// add_mm_counter_fast(mm, mm_counter_file(page), 1);
 
 #ifdef MAPCOUNT
 	mapcount = atomic_inc_and_test(&page->_mapcount);
 	BUG_ON(mapcount != 1);
 #endif
 
-    set_pte_at(mm, addr, pte, mk_pte(page, prot));
-    return 0;
+	set_pte_at(mm, addr, pte, mk_pte(page, prot));
+	return 0;
 }
 
 static int validate_page_before_insert(struct page *page)
 {
-    if (PageAnon(page) || PageSlab(page) || page_has_type(page))
-        return -EINVAL;
-    flush_dcache_page(page);
-    return 0;
+	if (PageAnon(page) || PageSlab(page) || page_has_type(page))
+		return -EINVAL;
+	flush_dcache_page(page);
+	return 0;
 }
 
 
 static int insert_page_in_batch_locked(struct mm_struct *mm, pte_t *pte,
-                                       unsigned long addr, struct page *page, pgprot_t prot)
+									   unsigned long addr, struct page *page, pgprot_t prot)
 {
-    int err;
+	int err;
 	BUG_ON(!page);
 
-    if (!page_count(page))
-        return -EINVAL;
-    err = validate_page_before_insert(page);
-    if (err)
-        return err;
-    return insert_page_into_pte_locked(mm, pte, addr, page, prot);
+	if (!page_count(page))
+		return -EINVAL;
+	err = validate_page_before_insert(page);
+	if (err)
+		return err;
+	return insert_page_into_pte_locked(mm, pte, addr, page, prot);
 }
 
 
@@ -345,31 +345,31 @@ static int insert_pages(struct vm_area_struct *vma, unsigned long addr, unsigned
 						struct free_pages *free_pages, pgprot_t prot,
 						exmap_insert_callback cb, struct exmap_alloc_ctx *alloc_ctx)
 {
-    pmd_t *pmd = NULL;
-    pte_t *start_pte, *pte;
-    spinlock_t *pte_lock;
-    struct mm_struct *const mm = vma->vm_mm;
-    unsigned long remaining_pages_total = num_pages;
-    unsigned long pages_to_write_in_pmd;
-    int ret, err;
+	pmd_t *pmd = NULL;
+	pte_t *start_pte, *pte;
+	spinlock_t *pte_lock;
+	struct mm_struct *const mm = vma->vm_mm;
+	unsigned long remaining_pages_total = num_pages;
+	unsigned long pages_to_write_in_pmd;
+	int ret, err;
 more:
-    ret = -EFAULT;
-    pmd = walk_to_pmd(mm, addr);
+	ret = -EFAULT;
+	pmd = walk_to_pmd(mm, addr);
 
-    if (!pmd)
-        goto out;
+	if (!pmd)
+		goto out;
 
-    pages_to_write_in_pmd = min_t(unsigned long,
-                                  remaining_pages_total, PTRS_PER_PTE - pte_index(addr));
+	pages_to_write_in_pmd = min_t(unsigned long,
+								  remaining_pages_total, PTRS_PER_PTE - pte_index(addr));
 
-    /* Allocate the PTE if necessary; takes PMD lock once only. */
-    ret = -ENOMEM;
-    if (exmap_pte_alloc(mm, pmd))
-        goto out;
+	/* Allocate the PTE if necessary; takes PMD lock once only. */
+	ret = -ENOMEM;
+	if (exmap_pte_alloc(mm, pmd))
+		goto out;
 
-    while (pages_to_write_in_pmd) {
-        int pte_idx = 0;
-        const int batch_size = pages_to_write_in_pmd; // min_t(int, pages_to_write_in_pmd, 8);
+	while (pages_to_write_in_pmd) {
+		int pte_idx = 0;
+		const int batch_size = pages_to_write_in_pmd; // min_t(int, pages_to_write_in_pmd, 8);
 
 		// Fastpath for single page in this PMD
 		if (pages_to_write_in_pmd == 1) {
@@ -392,26 +392,26 @@ more:
 		}
 
 		start_pte = pte_offset_map_lock(mm, pmd, addr, &pte_lock);
-        for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {
+		for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {
 			struct page *page = list_first_entry_or_null(&free_pages->list, struct page, lru);
 			BUG_ON(!page);
 
 			// unsigned long pfn = page_to_pfn(page);
 			// pr_info("alloc: addr: %p %p 0x%lx, %p", cb, alloc_ctx, addr - vma->vm_start, page);
 
-            err = insert_page_in_batch_locked(mm, pte, addr, page, prot);
+			err = insert_page_in_batch_locked(mm, pte, addr, page, prot);
 
-            // If the PTE was busy, we just skip it and use the page
-            // for the next PTE.
-            if (err == -EBUSY) {
+			// If the PTE was busy, we just skip it and use the page
+			// for the next PTE.
+			if (err == -EBUSY) {
 				/* pr_info("i_p: ebusy a_ctx=%p offs=0x%lx page=%p free count=%lu", alloc_ctx, addr - vma->vm_start, page, free_pages->count); */
 				// This is OK!
-            } else if (unlikely(err)) {
-                pte_unmap_unlock(start_pte, pte_lock);
-                ret = err;
-                remaining_pages_total -= pte_idx;
-                goto out;
-            } else {
+			} else if (unlikely(err)) {
+				pte_unmap_unlock(start_pte, pte_lock);
+				ret = err;
+				remaining_pages_total -= pte_idx;
+				goto out;
+			} else {
 				// We actually used the page
 				BUG_ON(free_pages->count == 0);
 				list_del(&page->lru);
@@ -422,34 +422,34 @@ more:
 			}
 
 
-            addr += PAGE_SIZE;
-        }
-        pte_unmap_unlock(start_pte, pte_lock);
-        pages_to_write_in_pmd -= batch_size;
-        remaining_pages_total -= batch_size;
-    }
-    if (remaining_pages_total)
-        goto more;
-    ret = 0;
+			addr += PAGE_SIZE;
+		}
+		pte_unmap_unlock(start_pte, pte_lock);
+		pages_to_write_in_pmd -= batch_size;
+		remaining_pages_total -= batch_size;
+	}
+	if (remaining_pages_total)
+		goto more;
+	ret = 0;
 out:
-    return ret;
+	return ret;
 }
 
 int exmap_insert_pages(struct vm_area_struct *vma, unsigned long addr,
 					   unsigned long num_pages, struct free_pages *pages,
 					   exmap_insert_callback cb, struct exmap_alloc_ctx *data)
 {
-    const unsigned long end_addr = addr + (pages->count * PAGE_SIZE) - 1;
+	const unsigned long end_addr = addr + (pages->count * PAGE_SIZE) - 1;
 
-    if (addr < vma->vm_start || end_addr >= vma->vm_end)
-        return -EFAULT;
-    if (!(vma->vm_flags & VM_MIXEDMAP)) {
-        BUG_ON(mmap_read_trylock(vma->vm_mm));
-        BUG_ON(vma->vm_flags & VM_PFNMAP);
-        vma->vm_flags |= VM_MIXEDMAP;
-    }
-    /* Defer page refcount checking till we're about to map that page. */
-    return insert_pages(vma, addr, num_pages, pages,
+	if (addr < vma->vm_start || end_addr >= vma->vm_end)
+		return -EFAULT;
+	if (!(vma->vm_flags & VM_MIXEDMAP)) {
+		BUG_ON(mmap_read_trylock(vma->vm_mm));
+		BUG_ON(vma->vm_flags & VM_PFNMAP);
+		vma->vm_flags |= VM_MIXEDMAP;
+	}
+	/* Defer page refcount checking till we're about to map that page. */
+	return insert_pages(vma, addr, num_pages, pages,
 						vma->vm_page_prot, cb, data);
 }
 
@@ -504,7 +504,7 @@ exmap_zap_pte_range(struct vm_area_struct *vma, pmd_t *pmd,
 	unsigned long freed_pages = 0;
 
 
-    // pr_info("PTE zap: 0x%lx-%lx %lx", addr, end, end - addr);
+	// pr_info("PTE zap: 0x%lx-%lx %lx", addr, end, end - addr);
 
 	start_pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
 	pte = start_pte;
@@ -573,10 +573,10 @@ static inline unsigned long exmap_zap_pmd_range(
 		 * mode.
 		 */
 
-        /*
-         * pmd_none_or_trans_huge_or_clear_bad was used, but
-         * didnt work FOR SOME REASON
-         */
+		/*
+		 * pmd_none_or_trans_huge_or_clear_bad was used, but
+		 * didnt work FOR SOME REASON
+		 */
 		if (pmd_none_or_clear_bad(pmd))
 			continue;
 		next = exmap_zap_pte_range(vma, pmd, addr, next, pages);
@@ -663,31 +663,31 @@ static int
 unmap_pages(struct vm_area_struct *vma, unsigned long addr, unsigned long num_pages,
 						struct free_pages *pages)
 {
-    pmd_t *pmd = NULL;
-    pte_t *start_pte, *pte;
-    spinlock_t *pte_lock;
-    struct mm_struct *const mm = vma->vm_mm;
-    unsigned long remaining_pages_total = num_pages;
-    unsigned long pages_to_write_in_pmd;
-    int ret, err;
+	pmd_t *pmd = NULL;
+	pte_t *start_pte, *pte;
+	spinlock_t *pte_lock;
+	struct mm_struct *const mm = vma->vm_mm;
+	unsigned long remaining_pages_total = num_pages;
+	unsigned long pages_to_write_in_pmd;
+	int ret, err;
 more:
-    ret = -EFAULT;
-    pmd = walk_to_pmd(mm, addr);
+	ret = -EFAULT;
+	pmd = walk_to_pmd(mm, addr);
 
-    if (!pmd)
-        goto out;
+	if (!pmd)
+		goto out;
 
-    pages_to_write_in_pmd = min_t(unsigned long,
-                                  remaining_pages_total, PTRS_PER_PTE - pte_index(addr));
+	pages_to_write_in_pmd = min_t(unsigned long,
+								  remaining_pages_total, PTRS_PER_PTE - pte_index(addr));
 
-    /* Allocate the PTE if necessary; takes PMD lock once only. */
-    ret = -ENOMEM;
-    if (exmap_pte_alloc(mm, pmd))
-        goto out;
+	/* Allocate the PTE if necessary; takes PMD lock once only. */
+	ret = -ENOMEM;
+	if (exmap_pte_alloc(mm, pmd))
+		goto out;
 
-    while (pages_to_write_in_pmd) {
-        int pte_idx = 0;
-        const int batch_size = pages_to_write_in_pmd; //min_t(int, pages_to_write_in_pmd, 8);
+	while (pages_to_write_in_pmd) {
+		int pte_idx = 0;
+		const int batch_size = pages_to_write_in_pmd; //min_t(int, pages_to_write_in_pmd, 8);
 
 		if (pages_to_write_in_pmd == 1) {
 			struct page *page;
@@ -705,8 +705,8 @@ more:
 			break;
 		}
 
-        start_pte = pte_offset_map_lock(mm, pmd, addr, &pte_lock);
-        for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {
+		start_pte = pte_offset_map_lock(mm, pmd, addr, &pte_lock);
+		for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {
 			pte_t ptent = ptep_get_and_clear(mm, addr, pte);
 			if (pte_present(ptent)) {
 				unsigned long pfn = pte_pfn(ptent);
@@ -721,7 +721,7 @@ more:
 
 				BUG_ON(!pte_none(*pte));
 				// pr_info("clear: addr: %lx -> %lu (%p) (none: %d) %d", addr, pfn, page, pte_none(*pte),
-                //    pages->count);
+				//    pages->count);
 				BUG_ON(!page);
 
 				list_add(&page->lru, &pages->list);
@@ -737,17 +737,17 @@ more:
 #endif
 			}
 
-            addr += PAGE_SIZE;
-        }
-        pte_unmap_unlock(start_pte, pte_lock);
-        pages_to_write_in_pmd -= batch_size;
-        remaining_pages_total -= batch_size;
-    }
+			addr += PAGE_SIZE;
+		}
+		pte_unmap_unlock(start_pte, pte_lock);
+		pages_to_write_in_pmd -= batch_size;
+		remaining_pages_total -= batch_size;
+	}
 	if (remaining_pages_total)
 	   goto more;
 	ret = 0;
 out:
-    return ret;
+	return ret;
 }
 
 
@@ -763,7 +763,7 @@ int exmap_unmap_pages( struct vm_area_struct *vma,
 	if (addr < vma->vm_start || end > vma->vm_end)
 		return -EFAULT;
 
-    exmap_debug("unmap: 0x%lx-0x%lx (%lu pages)", addr, end, (end - addr + 1) >> PAGE_SHIFT);
+	exmap_debug("unmap: 0x%lx-0x%lx (%lu pages)", addr, end, (end - addr + 1) >> PAGE_SHIFT);
 	if ((end - addr + 1 ) >> PAGE_SHIFT == 0) {
 		/* pr_info("exmap_unmap_pages: called to unmap 0 pages, skipping (num_pages = %lu)", num_pages); */
 		return 0;
