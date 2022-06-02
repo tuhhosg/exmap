@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-2.0
+# Linux kernel EditorConfig file (https://editorconfig.org/)
+
+# Located at the project root
+root = true
+
+# Base settings for most files
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+
+indent_style = tab
+indent_size = 4
+
+# This avoids introducing too many unnecessary changes in trivial commits
+trim_trailing_whitespace = false
+
+# General 4-space files
+[*.{pl,pm,py,tc,json,tc}]
+indent_style = space
+indent_size = 4
+
+# General 2-space files
+[*.{rb,rst,yaml,cocci,xsl,svg,bconf,clang-format}]
+indent_style = space
+indent_size = 2
+
+# Perf script wrappers
+[tools/perf/scripts/*/bin/*]
+indent_style = space
+indent_size = 4
+
+# Man pages
+[*.{1,2,3,4,5,6,7,8}]
+indent_style = space
+indent_size = 2
