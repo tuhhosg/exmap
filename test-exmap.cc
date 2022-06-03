@@ -56,7 +56,7 @@ int main() {
 	// Try to configure the exmap
 	setup.fd             = -1;
 	setup.max_interfaces = thread_count;
-	setup.buffer_size    = thread_count * 2 * 512;
+	setup.buffer_size    = thread_count * 512;
 	if (ioctl(exmap_fd, EXMAP_IOCTL_SETUP, &setup) < 0) {
 		PERR("ioctl: exmap_setup");
 	}
@@ -101,6 +101,10 @@ int main() {
 				}
 
 				// Free pages
+				for (unsigned i = 0; i < 512;  i++) {
+					interfaces[thread_id]->iov[i].page = thread_id * 512 + i;
+					interfaces[thread_id]->iov[i].len = 1;
+				}
 				action_params.opcode = EXMAP_OP_FREE;
 				if (ioctl(exmap_fd, EXMAP_IOCTL_ACTION, &action_params) < 0) {
 					PERR("ioctl: exmap_free");
