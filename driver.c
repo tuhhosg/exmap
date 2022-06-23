@@ -31,6 +31,7 @@
 #include "exmap.h"
 #include "ksyms.h"
 
+/* #define USE_SYSTEM_ALLOC */
 
 static dev_t first;
 static struct cdev cdev;
@@ -136,6 +137,9 @@ static inline int exmap_account_mem(struct exmap_ctx *ctx,
 void exmap_free_page_system(struct page * page) {
 //	current->rss_stat.count[mm_counter_file(page)] -= 1;
 	ClearPageReserved(page);
+#ifdef USE_SYSTEM_ALLOC
+	memset_page(page, 0, 0, sizeof(struct page));
+#endif
 	__free_pages(page, 0);
 }
 
@@ -278,12 +282,22 @@ again: // steal_from->free_pages must be locked.
 
 
 
+static void *exmap_mem_alloc(size_t size);
 static int
 exmap_alloc_pages(struct exmap_ctx *ctx,
 				  struct exmap_interface *interface,
 				  struct free_pages *pages,
 				  int min_pages) {
 	int steal_count;
+#ifdef USE_SYSTEM_ALLOC
+	int i;
+	for (i = 0; i < min_pages; i++) {
+		struct page* page = exmap_alloc_page_system();
+		list_add_tail(&page->lru, &pages->list);
+	}
+	pages->count += min_pages;
+	return 0;
+#endif
 
 	// 1. Try interface-local free list. For this we move at most
 	// min_pages into our output list (pages). Thereby, that list
@@ -315,7 +329,8 @@ exmap_alloc_pages(struct exmap_ctx *ctx,
 void exmap_free_page(struct exmap_ctx *ctx,
 					 struct exmap_interface* interface,
 					 struct page * page) {
-#if 0
+/* #if 0 */
+#ifdef USE_SYSTEM_ALLOC
 	exmap_free_page_system(page);
 	return;
 #endif
@@ -331,7 +346,8 @@ void exmap_free_pages(struct exmap_ctx *ctx,
 					  struct exmap_interface* interface,
 					  struct free_pages *pages) {
 
-#if 0
+/* #if 0 */
+#ifdef USE_SYSTEM_ALLOC
 	struct page * page, *npage;
 	list_for_each_entry_safe(page, npage, &pages->list, lru) {
 		exmap_free_page_system(page);
