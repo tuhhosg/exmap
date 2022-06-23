@@ -7,6 +7,7 @@
 
 #include "exmap.h"
 
+#define USE_FASTPATH
 
 
 /**
@@ -371,6 +372,7 @@ more:
 		int pte_idx = 0;
 		const int batch_size = pages_to_write_in_pmd; // min_t(int, pages_to_write_in_pmd, 8);
 
+#ifdef USE_FASTPATH
 		// Fastpath for single page in this PMD
 		if (pages_to_write_in_pmd == 1) {
 			struct page *page = list_first_entry_or_null(&free_pages->list, struct page, lru);
@@ -390,6 +392,7 @@ more:
 			remaining_pages_total -= 1;
 			break;
 		}
+#endif
 
 		start_pte = pte_offset_map_lock(mm, pmd, addr, &pte_lock);
 		for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {
@@ -689,6 +692,7 @@ more:
 		int pte_idx = 0;
 		const int batch_size = pages_to_write_in_pmd; //min_t(int, pages_to_write_in_pmd, 8);
 
+#ifdef USE_FASTPATH
 		if (pages_to_write_in_pmd == 1) {
 			struct page *page;
 
@@ -704,6 +708,7 @@ more:
 			addr += PAGE_SIZE;
 			break;
 		}
+#endif
 
 		start_pte = pte_offset_map_lock(mm, pmd, addr, &pte_lock);
 		for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {

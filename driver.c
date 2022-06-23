@@ -32,6 +32,7 @@
 #include "ksyms.h"
 
 /* #define USE_SYSTEM_ALLOC */
+#define BATCH_TLB_FLUSH
 
 static dev_t first;
 static struct cdev cdev;
@@ -778,11 +779,17 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 		interface->count.e += vec.pages;
 
 		WRITE_ONCE(interface->usermem->iov[idx], vec);
+
+#ifndef BATCH_TLB_FLUSH
+		flush_tlb_mm(vma->vm_mm);
+#endif
 	}
 
 	// Flush the TLB of this CPU!
 	// __flush_tlb_all(); 	// Please note: This is no shootdown!
+#ifdef BATCH_TLB_FLUSH
 	flush_tlb_mm(vma->vm_mm);
+#endif
 
 	// Update the RSS counter once!
 	// add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * free_pages.count);
