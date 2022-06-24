@@ -26,6 +26,8 @@
 
 #include <asm/tlbflush.h>
 
+#include "linux/version.h"
+
 #define EXMAP_IN_KERNEL
 #include "linux/exmap.h"
 #include "exmap.h"
@@ -138,9 +140,6 @@ static inline int exmap_account_mem(struct exmap_ctx *ctx,
 void exmap_free_page_system(struct page * page) {
 //	current->rss_stat.count[mm_counter_file(page)] -= 1;
 	ClearPageReserved(page);
-#ifdef USE_SYSTEM_ALLOC
-	memset_page(page, 0, 0, sizeof(struct page));
-#endif
 	__free_pages(page, 0);
 }
 
@@ -283,7 +282,6 @@ again: // steal_from->free_pages must be locked.
 
 
 
-static void *exmap_mem_alloc(size_t size);
 static int
 exmap_alloc_pages(struct exmap_ctx *ctx,
 				  struct exmap_interface *interface,
@@ -503,11 +501,27 @@ static void *exmap_mem_alloc(size_t size)
 	return (void *) __get_free_pages(gfp_flags, get_order(size));
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
+/*
+ * commit 3a3bae50af5d73fab5da20484029de77ca67bb2e:
+ * fs: Remove aops ->set_page_dirty
+ * With all implementations converted to ->dirty_folio, we can stop calling
+ * this fallback method and remove it entirely.
+ *
+ * TODO: verify whether this new ops struct is correct
+ * */
+static const struct address_space_operations dev_exmap_aops = {
+	.dirty_folio		= noop_dirty_folio,
+	.invalidate_folio		= folio_invalidate,
+	.direct_IO              = exmap_read_iter,
+};
+#else
 static const struct address_space_operations dev_exmap_aops = {
 	.set_page_dirty		= __set_page_dirty_no_writeback,
 	.invalidatepage		= noop_invalidatepage,
 	.direct_IO              = exmap_read_iter,
 };
+#endif
 
 
 static int open(struct inode *inode, struct file *filp) {
@@ -829,7 +843,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		pr_info("setup.buffer_size = %ld", setup.buffer_size);
 
 		// Interfaces can only be initialized once
-		pr_info("setup.interfaces = %p", ctx->interfaces);
+		/* pr_info("setup.interfaces = %p", ctx->interfaces); */
 		if (ctx->interfaces)
 			return -EBUSY;
 
@@ -1060,8 +1074,6 @@ static int dev_uevent_perms(struct device *dev, struct kobj_uevent_env *env) {
 }
 
 static int exmap_init_module(void) {
-	printk(KERN_INFO "exmap registered");
-
 	if (exmap_acquire_ksyms())
 		goto out;
 
@@ -1076,6 +1088,8 @@ static int exmap_init_module(void) {
 	cdev_init(&cdev, &fops);
 	if (cdev_add(&cdev, first, 1) == -1)
 		goto out_device_destroy;
+
+	printk(KERN_INFO "exmap registered");
 
 	return 0;
 
@@ -1094,7 +1108,7 @@ static void exmap_cleanup_module(void) {
 	device_destroy(cl, first);
 	class_destroy(cl);
 	unregister_chrdev_region(first, 1);
-	printk(KERN_INFO "Alvida: ofcd unregistered");
+	printk(KERN_INFO "exmap unregistered");
 }
 
 module_init(exmap_init_module)
