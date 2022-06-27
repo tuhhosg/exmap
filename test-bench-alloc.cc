@@ -120,7 +120,7 @@ int main() {
 					offset  += count;
 				}
 				assert(offset == EXMAP_USER_INTERFACE_PAGES);
-				uint16_t nr_pages = prepare_vector(interface, offset, EXMAP_USER_INTERFACE_PAGES);
+				uint16_t nr_pages = prepare_vector(interface, base_offset, EXMAP_USER_INTERFACE_PAGES);
 				struct exmap_action_params params_free = {
 					.interface = thread_id,
 					.iov_len   = nr_pages,

@@ -33,7 +33,7 @@
 #include "exmap.h"
 #include "ksyms.h"
 
-/* #define USE_SYSTEM_ALLOC */
+// #define USE_SYSTEM_ALLOC
 #define BATCH_TLB_FLUSH
 
 static dev_t first;
