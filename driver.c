@@ -34,6 +34,7 @@
 #include "ksyms.h"
 
 // #define USE_SYSTEM_ALLOC
+// #define USE_BULK_SYSTEM_ALLOC
 #define BATCH_TLB_FLUSH
 
 static dev_t first;
@@ -289,6 +290,14 @@ exmap_alloc_pages(struct exmap_ctx *ctx,
 				  int min_pages) {
 	int steal_count;
 #ifdef USE_SYSTEM_ALLOC
+#ifdef USE_BULK_SYSTEM_ALLOC
+	unsigned long ret = alloc_pages_bulk_list(GFP_NOIO | __GFP_ZERO, min_pages, &pages->list);
+	/* pr_info("alloc bulk list returned %lu", ret); */
+	if (ret != min_pages)
+		return -ENOMEM;
+	pages->count += ret;
+	return 0;
+#else
 	int i;
 	for (i = 0; i < min_pages; i++) {
 		struct page* page = exmap_alloc_page_system();
@@ -297,6 +306,7 @@ exmap_alloc_pages(struct exmap_ctx *ctx,
 	pages->count += min_pages;
 	return 0;
 #endif
+#endif	/* USE_SYSTEM_ALLOC */
 
 	// 1. Try interface-local free list. For this we move at most
 	// min_pages into our output list (pages). Thereby, that list
