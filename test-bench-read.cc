@@ -67,6 +67,15 @@ int main() {
             batch_size = EXMAP_USER_INTERFACE_PAGES;
     }
 
+	char *MODE = getenv("MODE");
+    int mode = 0;
+	if (MODE) {
+		mode = atoi(MODE);
+        if (mode < 0 || mode > 2)
+			mode = 0;
+	}
+
+
 	int baking_fd = open("/dev/nullb0", O_RDWR|O_DIRECT);
     if (baking_fd < 0) die("open");
 	
@@ -78,6 +87,8 @@ int main() {
 	if (map == MAP_FAILED) die("mmap");
 
     printf("# BATCH_SIZE: %d\n", batch_size);
+	printf("# THREADS: %d\n", thread_count);
+	printf("# MODE: %d\n", thread_count);
 	printf("# MAP: %p-%p\n", map, map + MAP_SIZE);
 
 	// must fail!
@@ -109,10 +120,25 @@ int main() {
 			struct iovec *vec = new iovec[EXMAP_USER_INTERFACE_PAGES];
 			while(true) {
 				// READ
+				int rc;
 				auto count = EXMAP_USER_INTERFACE_PAGES;
-			    prepare_iovec(map, vec, base_offset, count);
 
-				preadv(fd, vec, count, thread_id);
+				if (mode == 0) { // Proxy File Descriptor
+					prepare_iovec(map, vec, base_offset, count);
+					rc = preadv(fd, vec, count, thread_id);
+					if (rc < 0) exit(rc);
+				} else if (mode >= 1) {
+					prepare_iovec(map, vec, base_offset, count);
+					if (mode == 1) { // Prefault Mode
+						preadv(fd, vec, count, thread_id | (EXMAP_OP_ALLOC << 8));
+					}
+
+					for (unsigned i = 0; i < count ; i++) {
+						rc = pread(baking_fd, vec[i].iov_base, vec[i].iov_len,
+							  (uintptr_t)vec[i].iov_base - (uintptr_t)map);
+						if (rc < 0) exit(rc);
+					}
+				}
 
 				touch_vector(map, base_offset, count);
 
