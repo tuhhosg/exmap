@@ -17,6 +17,7 @@
 #include <fstream>
 #include <sstream>
 #include <boost/algorithm/string.hpp>
+#include <sys/uio.h>
 
 #include "linux/exmap.h"
 #include "bench_common.h"
@@ -31,6 +32,16 @@ uint16_t prepare_vector(struct exmap_user_interface *interface, unsigned offset,
 	}
 	return count;
 }
+
+uint16_t prepare_iovec(char *base, struct iovec *iov, unsigned offset, unsigned count) {
+
+	for (unsigned i = 0; i < count;  i++) {
+		iov[i].iov_base = base + (offset + i) * 4096;
+		iov[i].iov_len = 4096;
+	}
+	return count;
+}
+
 
 int touch_vector(char *exmap, unsigned offset, unsigned count) {
 
@@ -56,6 +67,9 @@ int main() {
             batch_size = EXMAP_USER_INTERFACE_PAGES;
     }
 
+	int baking_fd = open("/dev/nullb0", O_RDWR|O_DIRECT);
+    if (baking_fd < 0) die("open");
+	
     int fd = open("/dev/exmap", O_RDWR);
     if (fd < 0) die("open");
 
@@ -71,7 +85,7 @@ int main() {
 	assert(tmp == MAP_FAILED && errno == EBUSY);
 
 	struct exmap_ioctl_setup buffer;
-	buffer.fd             = -1; // Not baked by a file
+	buffer.fd             = baking_fd; // Not baked by a file
 	buffer.max_interfaces = thread_count;
 	buffer.buffer_size    = thread_count * 2 * 512;
 	if (ioctl(fd, EXMAP_IOCTL_SETUP, &buffer) < 0) {
@@ -92,34 +106,18 @@ int main() {
 			if (interface == MAP_FAILED) die("mmap");
 
 			unsigned base_offset = thread_id * 2 * EXMAP_USER_INTERFACE_PAGES;
+			struct iovec *vec = new iovec[EXMAP_USER_INTERFACE_PAGES];
 			while(true) {
-				unsigned offset = 0;
-				while (offset < EXMAP_USER_INTERFACE_PAGES) {
-					unsigned start = base_offset + offset;
-					unsigned count = std::min((unsigned)batch_size, EXMAP_USER_INTERFACE_PAGES - offset);
+				// READ
+				auto count = EXMAP_USER_INTERFACE_PAGES;
+			    prepare_iovec(map, vec, base_offset, count);
 
-					if (count == 1) {
-						if (pread(fd, &map[start * PAGE_SIZE], PAGE_SIZE, thread_id | (EXMAP_OP_ALLOC << 8)) != PAGE_SIZE) {
-							perror("pread: exmap_alloc");
-						}
-					} else {
-						uint16_t nr_pages = prepare_vector(interface, start, count);
-						struct exmap_action_params params_alloc = {
-							.interface = thread_id,
-							.iov_len   = nr_pages,
-							.opcode    = EXMAP_OP_ALLOC,
-						};
-						if (ioctl(fd, EXMAP_IOCTL_ACTION, &params_alloc) < 0) {
-							perror("ioctl: exmap_action");
-						}
-					}
+				preadv(fd, vec, count, thread_id);
 
-					touch_vector(map, start, count);
+				touch_vector(map, base_offset, count);
 
-					readCnt += count;
-					offset  += count;
-				}
-				assert(offset == EXMAP_USER_INTERFACE_PAGES);
+				readCnt += count;
+
 				uint16_t nr_pages = prepare_vector(interface, base_offset, EXMAP_USER_INTERFACE_PAGES);
 				struct exmap_action_params params_free = {
 					.interface = thread_id,

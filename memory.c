@@ -6,8 +6,7 @@
 #include <linux/memcontrol.h>
 
 #include "exmap.h"
-
-#define USE_FASTPATH
+#include "config.h"
 
 
 /**

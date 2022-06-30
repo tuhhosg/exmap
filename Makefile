@@ -1,5 +1,6 @@
 TESTS = \
 	test-bench-alloc \
+	test-bench-read  \
 	test-bench-steal \
 	test-exmap
 
