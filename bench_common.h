@@ -120,13 +120,20 @@ readTLBShootdownCount(void) {
 }
 
 static void output_legend() {
-	std::cout << "# time(s), reads or allocs(*1e6/s), shootdowns, shootdowns/IOP" << std::endl;
+	std::cout << "# time(s), reads or allocs(*1e6/s), shootdowns, shootdowns/IOP, avg ops (*1e6/s)" << std::endl;
 }
 
 static void output_line(int secs, int lastReadCnt, int shootdownDiff) {
-	std::cout << secs++ << ", "
+	static double readCntTotal = 0;
+	double avgReadCnt = 0.0;
+	if (secs > 0)  {
+		readCntTotal += (lastReadCnt /1e6);
+		avgReadCnt = readCntTotal / secs;
+	}
+	std::cout << secs << ", "
 			  << lastReadCnt/1e6 << ", "
 			  << shootdownDiff << ", "
-			  << (shootdownDiff / (double) lastReadCnt)
+			  << (shootdownDiff / (double) lastReadCnt) << ", "
+			  << (readCntTotal / (secs+1))
 			  << std::endl;
 }
