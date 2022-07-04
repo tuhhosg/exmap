@@ -42,7 +42,7 @@ static struct class *cl; // Global variable for the device class
 struct exmap_interface;
 struct exmap_ctx {
 	size_t buffer_size;
-	size_t alloc_count;
+	atomic_t alloc_count;
 
 	/* Only used for accounting purposes */
 	struct user_struct		*user;
@@ -320,6 +320,21 @@ exmap_alloc_pages(struct exmap_ctx *ctx,
 	if (min_pages == 0)
 		return 0;
 
+	// 2. As long as our memory limit (setup.buffer_size) isn't reached,
+	// we can get a page from the system allocator.
+	while (unlikely(atomic_read(&ctx->alloc_count) < ctx->buffer_size)
+		   && min_pages > 0) {
+		struct page *page = exmap_alloc_page_system();
+		list_add(&page->lru, &pages->list);
+		atomic_inc(&ctx->alloc_count);
+		pages->count++;
+		min_pages --;
+	}
+
+	if (min_pages == 0)
+		return 0;
+
+   
 	// 2. We start to steal pages from other interfaces.
 	steal_count = steal_pages(ctx, interface, pages, min_pages);
 	// pr_info("StolenB[%p]: %d\n", interface, steal_count);
@@ -382,13 +397,13 @@ static void vm_close(struct vm_area_struct *vma) {
 	// Free all pages in our interfaces
 	for (idx = 0; idx < ctx->max_interfaces; idx++) {
 		struct exmap_interface *interface = &ctx->interfaces[idx];
-		add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1* interface->free_pages.count);
-		
 		list_for_each_entry_safe(page, npage, &interface->free_pages.list, lru) {
 			exmap_free_page_system(page);
 			freed_pages ++;
 		}
 	}
+
+	add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * ctx->buffer_size);
 
 	// Raise the locked_vm_pages again
 	exmap_unaccount_mem(ctx, ctx->buffer_size);
@@ -958,18 +973,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		}
 
 		// 2. Allocate Memory from the system
-		while (ctx->alloc_count < ctx->buffer_size) {
-			struct page *page = exmap_alloc_page_system();
-			unsigned iface = ctx->alloc_count % ctx->max_interfaces;
-			if (!page) break;
-			exmap_free_page(ctx, &ctx->interfaces[iface], page);
-
-			ctx->alloc_count ++;
-		}
-		add_mm_counter(current->mm, MM_FILEPAGES, ctx->alloc_count);
-
-
-		pr_info("Allocated %ld pages\n", ctx->alloc_count);
+		add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size);
 
 		break;
 
