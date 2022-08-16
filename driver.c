@@ -519,7 +519,7 @@ static void vm_close(struct vm_area_struct *vma) {
 	add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * ctx->buffer_size);
 
 	// Raise the locked_vm_pages again
-	exmap_unaccount_mem(ctx, ctx->buffer_size);
+	// exmap_unaccount_mem(ctx, ctx->buffer_size);
 
 	pr_info("vm_close:  freed: %lu, unlock=%ld\n",
 			freed_pages, ctx->buffer_size);
@@ -590,12 +590,12 @@ static void exmap_notifier_release(struct mmu_notifier *mn,
 		struct exmap_TODORENAME_ctx TODORENAME_ctx = {
 			.ctx = ctx,
 			.interface = &ctx->interfaces[0],
-			.pages_count = pages,
+			.pages_count = 0,
 		};
 		rc = exmap_unmap_pages(vma, vma->vm_start, pages, &TODORENAME_ctx);
 		BUG_ON(rc != 0);
 
-		unmapped_pages = pages;	/* FIXME: not necessarily correct if unmap fails */
+		unmapped_pages = TODORENAME_ctx.pages_count;
 		/* unmapped_pages = free_pages.count; */
 
 		/* // Give Memory that is still mapped to the first interface */
@@ -970,7 +970,7 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 		exmap_debug("free[%d]: off=%llu, len=%d, freed: %lu",
 				iface,
 					(uint64_t) vec.page, (int) vec.len,
-					free_pages.count - old_free_count);
+					TODORENAME_ctx.pages_count - old_free_count);
 
 		if (rc < 0) failed++;
 		vec.res = rc;
