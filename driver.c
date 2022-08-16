@@ -860,6 +860,18 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	if (iov_len == 0)
 		return failed;
 
+	/* allocate pages from the system if possible */
+	unsigned num_pages = iov_len;
+	while (unlikely(ctx->alloc_count < ctx->buffer_size)
+		   && num_pages > 0) {
+		struct page *page = exmap_alloc_page_system();
+		push_page(page, &interface->local_pages, ctx);
+		ctx->alloc_count++;
+		num_pages--;
+	}
+	if (num_pages == 0)
+		add_mm_counter(current->mm, MM_FILEPAGES, iov_len);
+
 	// Pre-fill our pages store with as many pages as there are
 	// IO-Vectors, assuming that each vector uses at least one page
 	/* rc = exmap_alloc_pages(ctx, interface, &free_pages, */
@@ -1119,18 +1131,6 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			interface->local_pages.count = 0;
 			interface->local_pages.stack = exmap_alloc_page_system();
 		}
-
-		// 2. Allocate Memory from the system
-		while (ctx->alloc_count < ctx->buffer_size) {
-			struct page *page = exmap_alloc_page_system();
-			if (!page)
-				break;
-
-			unsigned iface = ctx->alloc_count % ctx->max_interfaces;
-			push_page(page, &ctx->interfaces[iface].local_pages, ctx);
-			ctx->alloc_count++;
-		}
-		add_mm_counter(current->mm, MM_FILEPAGES, ctx->alloc_count);
 
 		break;
 
