@@ -5,21 +5,6 @@
 
 #include "exmap_common.h"
 
-/* struct free_pages { */
-/* 	spinlock_t       lock; */
-/* 	struct list_head list; */
-/* 	unsigned long    count; */
-/* }; */
-
-/* #define FREE_PAGES_INIT(name) {.list = LIST_HEAD_INIT(name.list), .count = 0} */
-/* #define FREE_PAGES(name)							\ */
-/* 	struct free_pages name = FREE_PAGES_INIT(name) */
-
-/* static inline void free_pages_init(struct free_pages *fp) { */
-/* 	spin_lock_init(&fp->lock); */
-/* 	fp->count = 0; */
-/* 	INIT_LIST_HEAD(&fp->list); */
-/* } */
 
 struct page_bundle {
 	struct page* stack;
@@ -30,8 +15,6 @@ struct iface_count {
 	unsigned a; // alloc
 	unsigned r; // read
 	unsigned e; // evict
-	unsigned s; // steal
-	unsigned p; // steal (pages)
 };
 
 
@@ -40,14 +23,10 @@ struct exmap_interface {
 
 	/* alloc/read/evict/.. counters */
 	struct iface_count count;
-	/* default page steal target (interface) */
-	unsigned int steal_target;
 
 	// Page(s) that are shared with userspace
 	struct exmap_user_interface *usermem;
 
-	// Interface-local free page lock
-	/* struct free_pages free_pages; */
 	struct page_bundle local_pages;
 
 	// Temporary storage used during operations
