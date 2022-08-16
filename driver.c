@@ -531,23 +531,29 @@ static vm_fault_t vm_fault(struct vm_fault *vmf) {
 	pr_info("vm_fault: off=%ld\n", vmf->pgoff);
 	// We forbid the implicit page fault interface
 	return VM_FAULT_SIGSEGV;
-#else  /* FIXME: rewrite without free_pages */
+#else
 	int rc;
-	FREE_PAGES(free_pages);
+	/* FREE_PAGES(free_pages); */
 	struct vm_area_struct *vma = vmf->vma;
 	struct exmap_ctx *ctx = vma->vm_private_data;
 	struct exmap_interface *interface = &ctx->interfaces[0];
 
 
-	rc = exmap_alloc_pages(ctx, interface, &free_pages,
-						   1);
-	if (rc < 0) return VM_FAULT_SIGSEGV;
+	/* rc = exmap_alloc_pages(ctx, interface, &free_pages, */
+	/* 					   1); */
+	/* if (rc < 0) return VM_FAULT_SIGSEGV; */
+
+	struct exmap_TODORENAME_ctx TODORENAME_ctx = {
+		.ctx = ctx,
+		.interface = interface,
+		.pages_count = 1,
+	};
 
 	rc = exmap_insert_pages(vma, (uintptr_t) vmf->address,
-							1, &free_pages, NULL,NULL);
+							1, &TODORENAME_ctx, NULL,NULL);
 	if (rc < 0) return VM_FAULT_SIGSEGV;
 
-	exmap_free_pages(ctx, interface, &free_pages);
+	/* exmap_free_pages(ctx, interface, &free_pages); */
 
 	return VM_FAULT_NOPAGE;
 #endif
