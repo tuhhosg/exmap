@@ -74,7 +74,7 @@ The `exmap_ioctl` function handles all `ioctl` calls depending on their opcode, 
 
 - copies the `exmap_ioctl_setup` from user memory
 - sets (optional) backing fd, memory size, interface count and allocates memory for the interfaces
-- pre-allocates memory from the system to fill interface free pages lists
+- allocates memory from the system for one bundle of free pages per interface. This bundle is a single page, whose memory can be filled with up to 512 addresses of free pages. These are allocated on demand, and not pre-allocated, as the latter method leads to a large performance drop.
 - NOTE: currently the system `rlimit` for locked memory/pages is ignored
 
 Now the user has to create at least one `exmap_user_interface` via `mmap`.
@@ -84,16 +84,11 @@ Now the user has to create at least one `exmap_user_interface` via `mmap`.
 Via this interface and `ioctl`, the user can perform actions like:
 
 - `exmap_alloc`
-  - create `free_pages` list and pre-allocate pages to fill it
-	- TODO elaborate: stealing
-  - iterate over the list of iovecs and insert the pages into their respective PTEs
+  - allocate pages from the system on demand, if possible
+  - iterate over the list of iovecs and insert pages from the given interface into their respective PTEs
   - TODO elaborate: `walk_to_pmd` also creates the multi-layered paging structure
-- `exmap_read`
-  - like alloc, with the addition reading into the allocated memory
-  - calculates the disk offset from the given address and the start of the VMA
-  - TODO kiob?
 - `exmap_free`
-  - insert pages back into the interface's free list
+  - unmap pages, which returns them to the interface's free bundle
   - perform a TLB shootdown with `flush_tlb_mm`
 
 On module unload: `exmap_cleanup_module` deletes the chardev `/dev/exmap`.

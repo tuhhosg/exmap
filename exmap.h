@@ -2,6 +2,7 @@
 
 #include <linux/mm.h>
 #include <linux/list.h>
+#include <linux/blk_types.h>
 
 #include "exmap_common.h"
 

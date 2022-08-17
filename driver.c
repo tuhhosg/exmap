@@ -208,11 +208,9 @@ void exmap_free_stack(struct page* stack, unsigned count) {
 	exmap_free_page_system(stack);
 }
 
-/* FIXME: something (probably) here causes bad page state for alloc with threads>>cores */
 static void vm_close(struct vm_area_struct *vma) {
 	struct exmap_ctx *ctx = vma->vm_private_data;
 	unsigned long freed_pages = 0;
-	/* struct page *page, *npage; */
 	int idx;
 
 	if (!ctx->interfaces)
@@ -445,6 +443,7 @@ free_ctx:
 	return rc;
 }
 
+/* FIXME: something here(?) causes bad page state for threads >= 32 (with 16 cores) */
 static int release(struct inode *inode, struct file *filp) {
 	struct exmap_ctx *ctx = filp->private_data;
 
@@ -781,6 +780,11 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			return -EINVAL;
 
 		ctx->max_interfaces = setup.max_interfaces;
+		/* warn if more interfaces are created than there are CPUs */
+		if (num_online_cpus() < setup.max_interfaces) {
+			pr_warn("exmap: More interfaces (%u) than CPUs (%u)\n", setup.max_interfaces, num_online_cpus());
+		}
+
 		gfp_flags = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP |
 			__GFP_NORETRY | __GFP_ACCOUNT;
 		ctx->interfaces     = kvzalloc(setup.max_interfaces * sizeof(struct exmap_interface), gfp_flags);

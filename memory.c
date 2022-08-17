@@ -3,7 +3,6 @@
 #include <asm/mmu_context.h>
 #include <asm/pgalloc.h>
 #include <asm/cacheflush.h>
-#include <linux/memcontrol.h>
 
 #include "exmap.h"
 #include "config.h"
