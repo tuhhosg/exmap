@@ -59,6 +59,12 @@ struct exmap_ctx {
 	int    max_interfaces;
 	struct exmap_interface *interfaces;
 
+	/* @buffer_size contiguous pages */
+	struct page* contig_pages;
+	unsigned contig_counter;
+	size_t contig_size;
+	spinlock_t contig_lock;
+
 	/* exmap-local singly-linked list of free pages */
 	struct llist_head global_free_list;
 	spinlock_t free_list_lock;
@@ -190,6 +196,23 @@ struct page* exmap_alloc_page_system(void) {
 	return page;
 }
 
+struct page* exmap_alloc_page_contig(struct exmap_ctx* ctx) {
+	/* BUG_ON(ctx->contig_counter >= ctx->contig_size); */
+	if (ctx->contig_counter >= ctx->contig_size)
+		return NULL;
+
+	/* NOTE: beware of pointer arithmetic, this adds counter*sizeof(struct page) each time */
+	/* TODO: lock needed? */
+	spin_lock(&ctx->contig_lock);
+	struct page* page = ctx->contig_pages + ctx->contig_counter++;
+	ctx->alloc_count++;
+	spin_unlock(&ctx->contig_lock);
+	/* pr_info("alloc_contig: got page %lx (virt %lx), counter now %u\n", page, page_to_virt(page), ctx->contig_counter); */
+	SetPageReserved(page);
+//	current->rss_stat.count[mm_counter_file(page)] += 1;
+	return page;
+}
+
 void exmap_free_stack(struct page* stack, unsigned count) {
 	/* interface-local free pages stack can temporarily be NULL until the next page gets pushed */
 	if (!stack)
@@ -216,6 +239,16 @@ static void vm_close(struct vm_area_struct *vma) {
 	if (!ctx->interfaces)
 		return;
 
+	/* free all (contiguous) pages allocated from the system */
+	unsigned i;
+	for (i = 0; i < ctx->contig_size; i++) {
+		struct page* page = ctx->contig_pages + i;
+		page->mapping = NULL;
+		ClearPageReserved(page);
+	}
+	free_contig_range(page_to_pfn(ctx->contig_pages), ctx->contig_size);
+
+#if 0
 	// Free all pages in our interfaces
 	for (idx = 0; idx < ctx->max_interfaces; idx++) {
 		struct exmap_interface *interface = &ctx->interfaces[idx];
@@ -243,6 +276,7 @@ static void vm_close(struct vm_area_struct *vma) {
 
 		node = node->next;
 	}
+#endif
 
 	add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * ctx->buffer_size);
 
@@ -380,8 +414,7 @@ static void exmap_mem_free(void *ptr, size_t size) {
 
 static void *exmap_mem_alloc(size_t size)
 {
-	gfp_t gfp_flags = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP |
-		__GFP_NORETRY | __GFP_ACCOUNT;
+	gfp_t gfp_flags = GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP | __GFP_NORETRY;
 
 	return (void *) __get_free_pages(gfp_flags, get_order(size));
 }
@@ -578,11 +611,16 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 
 	/* allocate pages from the system if possible */
 	unsigned num_pages = iov_len;
-	while (unlikely(ctx->alloc_count < ctx->buffer_size)
-		   && num_pages > 0) {
-		struct page *page = exmap_alloc_page_system();
+	while (unlikely(ctx->alloc_count < ctx->buffer_size) && num_pages > 0) {
+		struct page* page = exmap_alloc_page_contig(ctx);
+		if (!page) {
+			pr_warn("exmap_alloc: no page, alloc=%lu, alloc_max=%lu, contig=%lu, contig_max=%lu\n",
+				ctx->alloc_count, ctx->buffer_size, ctx->contig_counter, ctx->contig_size);
+			break;
+		}
+		/* pr_info("exmap_alloc: push %lx on %d", page, iface); */
 		push_page(page, &interface->local_pages, ctx);
-		ctx->alloc_count++;
+		/* ctx->alloc_count++; */
 		num_pages--;
 	}
 	if (num_pages == 0)
@@ -785,13 +823,27 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			pr_warn("exmap: More interfaces (%u) than CPUs (%u)\n", setup.max_interfaces, num_online_cpus());
 		}
 
-		gfp_flags = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP |
-			__GFP_NORETRY | __GFP_ACCOUNT;
-		ctx->interfaces     = kvzalloc(setup.max_interfaces * sizeof(struct exmap_interface), gfp_flags);
+		gfp_flags = GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP | __GFP_NORETRY;
+		ctx->interfaces = kvzalloc(setup.max_interfaces * sizeof(struct exmap_interface), gfp_flags);
 		if (!ctx->interfaces) {
 			pr_info("interfaces failed");
 			return -ENOMEM;
 		}
+
+
+		/* @buffer_size + one page for the bundle/stack for each interface */
+		ctx->contig_size = setup.buffer_size + setup.max_interfaces;
+		ctx->contig_pages = alloc_contig_pages(ctx->contig_size, GFP_NOIO | __GFP_ZERO,
+												first_online_node, NULL);
+		if (!ctx->contig_pages) {
+			pr_info("allocation of %lu contiguous pages failed", setup.buffer_size);
+			return -ENOMEM;
+		}
+		ctx->contig_counter = 0;
+		spin_lock_init(&ctx->contig_lock);
+		pr_info("allocated %lu+%lu contiguous pages at %lx\n",
+				setup.buffer_size, setup.max_interfaces, ctx->contig_pages);
+
 
 		ctx->global_free_list.first = NULL;
 		spin_lock_init(&ctx->free_list_lock);
@@ -816,7 +868,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			mutex_init(&interface->interface_lock);
 
 			interface->local_pages.count = 0;
-			interface->local_pages.stack = exmap_alloc_page_system();
+			interface->local_pages.stack = exmap_alloc_page_contig(ctx);
 		}
 
 		break;

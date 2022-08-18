@@ -21,6 +21,8 @@ static ssize_t (*vfs_read_ksym)(struct file *file, char __user *buf,
 
 static void (*iov_iter_restore_ksym)(struct iov_iter *i, struct iov_iter_state *state);
 
+struct page* (*alloc_contig_pages_ksym)(unsigned long nr_pages, gfp_t gfp_mask,
+				       int nid, nodemask_t *nodemask);
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 
@@ -52,6 +54,9 @@ int exmap_acquire_ksyms(void)
 	if(!iov_iter_restore_ksym)
 		return -1;
 
+	alloc_contig_pages_ksym = (void *)kallsyms_lookup_name("alloc_contig_pages");
+	if(!alloc_contig_pages_ksym)
+		return -1;
 
 	return 0;
 }
@@ -72,4 +77,9 @@ ssize_t vfs_read(struct file *file, char __user *buf,
 void iov_iter_restore(struct iov_iter *i, struct iov_iter_state *state)
 {
 	return iov_iter_restore_ksym(i, state);
+}
+
+struct page *alloc_contig_pages(unsigned long nr_pages, gfp_t gfp_mask,
+								int nid, nodemask_t *nodemask) {
+	return alloc_contig_pages_ksym(nr_pages, gfp_mask, nid, nodemask);
 }
