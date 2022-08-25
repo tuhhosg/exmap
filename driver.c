@@ -824,7 +824,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		}
 
 		gfp_flags = GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP | __GFP_NORETRY;
-		ctx->interfaces = kvzalloc(setup.max_interfaces * sizeof(struct exmap_interface), gfp_flags);
+		ctx->interfaces = __vmalloc_array(setup.max_interfaces, sizeof(struct exmap_interface), gfp_flags);
 		if (!ctx->interfaces) {
 			pr_info("interfaces failed");
 			return -ENOMEM;

@@ -5,6 +5,7 @@
 #include <linux/compiler_types.h>
 #include <linux/rmap.h>
 #include <linux/kprobes.h>
+#include <linux/uio.h>
 
 static struct kprobe kp = {
 	.symbol_name = "kallsyms_lookup_name"
