@@ -938,9 +938,13 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			return -EINVAL;
 
 		ctx->max_interfaces = setup.max_interfaces;
-		gfp_flags = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP |
-			__GFP_NORETRY | __GFP_ACCOUNT;
-		ctx->interfaces     = kvzalloc(setup.max_interfaces * sizeof(struct exmap_interface), gfp_flags);
+		/* warn if more interfaces are created than there are CPUs */
+		if (num_online_cpus() < setup.max_interfaces) {
+			pr_warn("exmap: More interfaces (%u) than CPUs (%u)\n", setup.max_interfaces, num_online_cpus());
+		}
+
+		gfp_flags = GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP | __GFP_NORETRY;
+		ctx->interfaces = __vmalloc_array(setup.max_interfaces, sizeof(struct exmap_interface), gfp_flags);
 		if (!ctx->interfaces) {
 			pr_info("interfaces failed");
 			return -ENOMEM;
