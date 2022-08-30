@@ -74,3 +74,17 @@ void iov_iter_restore(struct iov_iter *i, struct iov_iter_state *state)
 {
 	return iov_iter_restore_ksym(i, state);
 }
+
+#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
+#include <linux/vmalloc.h>
+
+void *__vmalloc_array(size_t n, size_t size, gfp_t flags)
+{
+	size_t bytes;
+
+	if (unlikely(check_mul_overflow(n, size, &bytes)))
+		return NULL;
+	return __vmalloc(bytes, flags);
+}
+#endif
