@@ -84,3 +84,17 @@ struct page *alloc_contig_pages(unsigned long nr_pages, gfp_t gfp_mask,
 								int nid, nodemask_t *nodemask) {
 	return alloc_contig_pages_ksym(nr_pages, gfp_mask, nid, nodemask);
 }
+
+#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 18, 0)
+#include <linux/vmalloc.h>
+
+void *__vmalloc_array(size_t n, size_t size, gfp_t flags)
+{
+	size_t bytes;
+
+	if (unlikely(check_mul_overflow(n, size, &bytes)))
+		return NULL;
+	return __vmalloc(bytes, flags);
+}
+#endif
