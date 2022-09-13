@@ -303,14 +303,14 @@ static vm_fault_t vm_fault(struct vm_fault *vmf) {
 	struct exmap_ctx *ctx = vma->vm_private_data;
 	struct exmap_interface *interface = &ctx->interfaces[0];
 
-	struct exmap_TODORENAME_ctx TODORENAME_ctx = {
+	struct exmap_pages_ctx pages_ctx = {
 		.ctx = ctx,
 		.interface = interface,
 		.pages_count = 1,
 	};
 
 	rc = exmap_insert_pages(vma, (uintptr_t) vmf->address,
-							1, &TODORENAME_ctx, NULL,NULL);
+							1, &pages_ctx, NULL,NULL);
 	if (rc < 0) return VM_FAULT_SIGSEGV;
 
 	return VM_FAULT_NOPAGE;
@@ -344,15 +344,15 @@ static void exmap_notifier_release(struct mmu_notifier *mn,
 		struct vm_area_struct *vma = ctx->exmap_vma;
 		unsigned long pages = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
 
-		struct exmap_TODORENAME_ctx TODORENAME_ctx = {
+		struct exmap_pages_ctx pages_ctx = {
 			.ctx = ctx,
 			.interface = &ctx->interfaces[0],
 			.pages_count = 0,
 		};
-		rc = exmap_unmap_pages(vma, vma->vm_start, pages, &TODORENAME_ctx);
+		rc = exmap_unmap_pages(vma, vma->vm_start, pages, &pages_ctx);
 		BUG_ON(rc != 0);
 
-		unmapped_pages = TODORENAME_ctx.pages_count;
+		unmapped_pages = pages_ctx.pages_count;
 
 		printk("notifier_release: purged %d pages\n", unmapped_pages);
 	}
@@ -644,7 +644,7 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	// Do we really need this lock?
 	mmap_read_lock(vma->vm_mm);
 
-	struct exmap_TODORENAME_ctx TODORENAME_ctx = {
+	struct exmap_pages_ctx pages_ctx = {
 		.ctx = ctx,
 		.interface = interface,
 		.pages_count = iov_len,
@@ -661,13 +661,13 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 
 		// pr_info("alloc[%d]: off=%llu, len=%d", iface, (uint64_t) vec.page, (int) vec.len);
 
-		free_pages_before = TODORENAME_ctx.pages_count;
-		rc = exmap_insert_pages(vma, uaddr, vec.len, &TODORENAME_ctx,
+		free_pages_before = pages_ctx.pages_count;
+		rc = exmap_insert_pages(vma, uaddr, vec.len, &pages_ctx,
 								NULL, &alloc_ctx);
 		if (rc < 0) failed++;
 
 		ret.res = rc;
-		ret.pages = (int)(free_pages_before - TODORENAME_ctx.pages_count);
+		ret.pages = (int)(free_pages_before - pages_ctx.pages_count);
 		nr_pages_alloced += ret.pages;
 
 		exmap_debug("alloc: %llu+%d => rc=%d, used=%d",
@@ -703,7 +703,7 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	// Do we really need this lock?
 	mmap_read_lock(vma->vm_mm);
 
-	struct exmap_TODORENAME_ctx TODORENAME_ctx = {
+	struct exmap_pages_ctx pages_ctx = {
 		.ctx = ctx,
 		.interface = interface,
 		.pages_count = 0,
@@ -712,23 +712,23 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	for (idx = 0; idx < iov_len; idx++) {
 		struct exmap_iov vec = READ_ONCE(interface->usermem->iov[idx]);
 		unsigned long uaddr = vma->vm_start + (vec.page << PAGE_SHIFT);
-		unsigned long old_free_count = TODORENAME_ctx.pages_count;
+		unsigned long old_free_count = pages_ctx.pages_count;
 
 		/* FIXME what if vec.len == 0 */
 		/* if (vec.len == 0) */
 		/* 	continue; */
 
 
-		rc = exmap_unmap_pages(vma, uaddr, (int) vec.len, &TODORENAME_ctx);
+		rc = exmap_unmap_pages(vma, uaddr, (int) vec.len, &pages_ctx);
 
 		exmap_debug("free[%d]: off=%llu, len=%d, freed: %lu",
 				iface,
 					(uint64_t) vec.page, (int) vec.len,
-					TODORENAME_ctx.pages_count - old_free_count);
+					pages_ctx.pages_count - old_free_count);
 
 		if (rc < 0) failed++;
 		vec.res = rc;
-		vec.pages = TODORENAME_ctx.pages_count - old_free_count;
+		vec.pages = pages_ctx.pages_count - old_free_count;
 
 		interface->count.e += vec.pages;
 
@@ -837,6 +837,14 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			pr_warn("exmap: More interfaces (%u) than CPUs (%u)\n", setup.max_interfaces, num_online_cpus());
 		}
 
+		/*
+		 * kvmalloc in combination with __GFP_COMP leads to "bad page state" errors
+		 * when freeing the memory again. This is probably due to VM_ALLOW_HUGE_VMAP
+		 * being set in kvmalloc_node (see 3b8000ae185cb068adbda5f966a3835053c85fd4).
+		 *
+		 * We have two options to fix this, either by using __vmalloc derivatives, or
+		 * by removing the __GFP_COMP flag.
+		 */
 		gfp_flags = GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP | __GFP_NORETRY;
 		ctx->interfaces = __vmalloc_array(setup.max_interfaces, sizeof(struct exmap_interface), gfp_flags);
 		if (!ctx->interfaces) {
@@ -930,7 +938,7 @@ ssize_t exmap_alloc_iter(struct exmap_ctx *ctx, struct exmap_interface *interfac
 		char __user* addr = iovec.iov_base;
 		ssize_t size = iovec.iov_len;
 
-		struct exmap_TODORENAME_ctx TODORENAME_ctx = {
+		struct exmap_pages_ctx pages_ctx = {
 			.ctx = ctx,
 			.interface = interface,
 			.pages_count = size,
@@ -962,7 +970,7 @@ ssize_t exmap_alloc_iter(struct exmap_ctx *ctx, struct exmap_interface *interfac
 
 		rc = exmap_insert_pages(ctx->exmap_vma, (uintptr_t) addr,
 								(size >> PAGE_SHIFT),
-								&TODORENAME_ctx, NULL,NULL);
+								&pages_ctx, NULL,NULL);
 		if (rc < 0) return rc;
 		rc_all += rc;
 

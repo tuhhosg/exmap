@@ -45,7 +45,7 @@ struct exmap_interface {
 };
 struct exmap_ctx;
 
-struct exmap_TODORENAME_ctx {
+struct exmap_pages_ctx {
 	struct exmap_ctx *ctx;
 	struct exmap_interface *interface;
 	unsigned long pages_count;
@@ -60,14 +60,14 @@ typedef int (*exmap_insert_callback)(struct exmap_alloc_ctx *, unsigned long, st
 
 int exmap_insert_pages(struct vm_area_struct *vma,
 					   unsigned long addr, unsigned long num_pages,
-					   struct exmap_TODORENAME_ctx* ctx,
+					   struct exmap_pages_ctx* ctx,
 					   /* struct free_pages *pages, */
 					   exmap_insert_callback cb, struct exmap_alloc_ctx *data);
 
 struct exmap_interface;
 int exmap_unmap_pages(struct vm_area_struct *vma,
 					  unsigned long addr, unsigned long num_pages,
-					  struct exmap_TODORENAME_ctx* ctx);
+					  struct exmap_pages_ctx* ctx);
 					  /* struct free_pages *pages); */
 
 // #define exmap_debug(...) pr_info("exmap:" __VA_ARGS__)

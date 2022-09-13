@@ -342,7 +342,7 @@ static int insert_page_fastpath(pte_t *pte, unsigned long addr, struct page *pag
  */
 static int insert_pages(struct vm_area_struct *vma, unsigned long addr, unsigned long num_pages,
 						/* struct free_pages *free_pages, */
-						struct exmap_TODORENAME_ctx* ctx,
+						struct exmap_pages_ctx* ctx,
 						pgprot_t prot,
 						exmap_insert_callback cb, struct exmap_alloc_ctx *alloc_ctx)
 {
@@ -438,7 +438,7 @@ out:
 
 int exmap_insert_pages(struct vm_area_struct *vma, unsigned long addr,
 					   unsigned long num_pages,
-					   struct exmap_TODORENAME_ctx* ctx,
+					   struct exmap_pages_ctx* ctx,
 					   exmap_insert_callback cb, struct exmap_alloc_ctx *data)
 {
 	const unsigned long end_addr = addr + (ctx->pages_count * PAGE_SIZE) - 1;
@@ -525,7 +525,7 @@ unmap_page_fastpath(pte_t *pte) {
  */
 static int
 unmap_pages(struct vm_area_struct *vma, unsigned long addr, unsigned long num_pages,
-			struct exmap_TODORENAME_ctx* ctx)
+			struct exmap_pages_ctx* ctx)
 {
 	pmd_t *pmd = NULL;
 	pte_t *start_pte, *pte;
@@ -618,7 +618,7 @@ out:
 // adapted from: unmap_page_range
 int exmap_unmap_pages( struct vm_area_struct *vma,
 					  unsigned long addr, unsigned long num_pages,
-					  struct exmap_TODORENAME_ctx *ctx)
+					  struct exmap_pages_ctx *ctx)
 {
 	const unsigned long end = addr + (num_pages * PAGE_SIZE);
 	pgd_t *pgd;
