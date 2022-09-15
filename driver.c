@@ -827,6 +827,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		//     return rc;
 		// }
 		ctx->buffer_size += setup.buffer_size;
+		ctx->alloc_count = 0;
 
 		if (setup.max_interfaces > 256)
 			return -EINVAL;
@@ -896,6 +897,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			interface->local_pages.stack = exmap_alloc_page_contig(ctx);
 #else
 			interface->local_pages.stack = exmap_alloc_page_system();
+			ctx->alloc_count++;
 #endif
 		}
 
