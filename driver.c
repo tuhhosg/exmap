@@ -933,6 +933,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		//     return rc;
 		// }
 		ctx->buffer_size += setup.buffer_size;
+		atomic_set(&ctx->alloc_count, 0);
 
 		if (setup.max_interfaces > 256)
 			return -EINVAL;

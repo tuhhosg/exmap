@@ -93,6 +93,57 @@ public:
 	}
 };
 
+template <typename T> class lf_stack {
+	struct node {
+		T data;
+		struct node* next;
+	};
+	struct head {
+		std::atomic<node*> first;
+	} stack;
+
+	semaphore lock;
+public:
+	lf_stack() : lock(1) { stack.first.store(nullptr); }
+
+	T pop() {
+		struct node *entry, *old_entry, *next;
+
+		// lock.acquire();
+
+		for (;;) {
+			entry = stack.first.load();
+			if (entry == NULL)
+				continue;
+			old_entry = entry;
+			next = entry->next;
+			if (stack.first.compare_exchange_strong(old_entry, next)) {
+				break;
+			}
+		}
+
+		// lock.release();
+		return entry->data;
+	}
+
+	void push(T val) {
+		struct node *first;
+		struct node *new_first = new node;
+
+		new_first->data = val;
+		do {
+			new_first->next = first = stack.first.load();
+		} while (!stack.first.compare_exchange_strong(first, new_first));
+	}
+};
+
+static inline long long unsigned time_ns(struct timespec* const ts) {
+  if (clock_gettime(CLOCK_REALTIME, ts)) {
+    exit(1);
+  }
+  return ((long long unsigned) ts->tv_sec) * (long long unsigned) 1e9
+    + (long long unsigned) ts->tv_nsec;
+}
 
 static unsigned long long
 readTLBShootdownCount(void) {

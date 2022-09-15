@@ -27,6 +27,7 @@
 #define DIFFERENT_THREAD
 #endif
 
+// #define USE_LOCKED
 
 uint16_t prepare_vector(struct exmap_user_interface *interface, unsigned spread, unsigned offset) {
 
@@ -70,6 +71,7 @@ int main() {
 	// that have been allocated or freed, meaning they are
 	// ready to be freed or allocated again, respectively
 	LockedQueue<unsigned> oq_a, oq_f;
+	lf_stack<unsigned> s_a, s_f;
 #endif
 
 	int fd = open("/dev/exmap", O_RDWR);
@@ -154,7 +156,11 @@ int main() {
 	// free buffer.
 	printf("# %d pages, %d packets\n", MEMORY_POOL_SIZE / EXMAP_USER_INTERFACE_PAGES, alloc_count);
 	for (uint16_t i=0; i < MEMORY_POOL_SIZE / EXMAP_USER_INTERFACE_PAGES-2*alloc_count; i++) {
+#ifdef USE_LOCKED
 		oq_f.push(i * EXMAP_USER_INTERFACE_PAGES);
+#else
+		s_f.push(i * EXMAP_USER_INTERFACE_PAGES);
+#endif
 	}
 
 	for (uint16_t thread_id=0; thread_id < alloc_count; thread_id++) {
@@ -169,7 +175,12 @@ int main() {
 			while(true) {
 				// we can only (re-)alloc for a base_offset when the corresponding free has finished
 				// if the free is still running: use after free
+#ifdef USE_LOCKED
 				unsigned offset = oq_f.pop();
+#else
+				unsigned offset = s_f.pop();
+#endif
+				// alloc on one interface
 				uint16_t nr_pages = prepare_vector(interface, 1, offset);
 				struct exmap_action_params params_alloc = {
 					.interface = iface,
@@ -182,7 +193,11 @@ int main() {
 
 				touch_vector((volatile char*) map, 1, offset);
 				readCnt += nr_pages;
+#ifdef USE_LOCKED
 				oq_a.push(offset);
+#else
+				s_a.push(offset);
+#endif
 			}
 		});
 	}
@@ -196,7 +211,12 @@ int main() {
 			if (interface == MAP_FAILED) die("mmap");
 
 			while(true) {
+#ifdef USE_LOCKED
 				unsigned offset = oq_a.pop();
+#else
+				unsigned offset = s_a.pop();
+#endif
+				// free on another interface
 				uint16_t nr_pages = prepare_vector(interface, 1, offset);
 				struct exmap_action_params params_free = {
 					.interface = iface,
@@ -206,7 +226,11 @@ int main() {
 				if (ioctl(fd, EXMAP_IOCTL_ACTION, &params_free) < 0) {
 					perror("ioctl: exmap_action");
 				}
+#ifdef USE_LOCKED
 				oq_f.push(offset);
+#else
+				s_f.push(offset);
+#endif
 			}
 		});
 	}
