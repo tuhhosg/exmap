@@ -42,62 +42,109 @@ static struct class *cl; // Global variable for the device class
 struct exmap_interface;
 struct exmap_ctx {
 	size_t buffer_size;
-	atomic_t alloc_count;
+	size_t alloc_count;
 
 	/* Only used for accounting purposes */
 	struct user_struct		*user;
 	struct mm_struct		*mm_account;
 
-	/* Here is the main buffer located */
+	/* The main buffer is located here */
 	struct vm_area_struct *exmap_vma;
 
-	/* The baking storage */
+	/* The backing storage */
 	struct file *file_backend;
 	struct block_device *bdev;
 
-	/* Interfaces are memory mapped aread where the kernel can communicate to the user
-	 */
+	/* Interfaces are memory mapped areas where the kernel can communicate with the user */
 	int    max_interfaces;
 	struct exmap_interface *interfaces;
+
+	/* @buffer_size contiguous pages */
+	struct page* contig_pages;
+	unsigned contig_counter;
+	size_t contig_size;
+	spinlock_t contig_lock;
+
+	/* exmap-local singly-linked list of free pages */
+	struct llist_head global_free_list;
+	spinlock_t free_list_lock;
 
 	struct mmu_notifier mmu_notifier;
 };
 
-struct iface_count {
-	unsigned a; // alloc
-	unsigned r; // read
-	unsigned e; // evict
-	unsigned s; // steal
-	unsigned p; // steal (pages)
-};
+void push_bundle(struct page_bundle bundle, struct exmap_ctx* ctx) {
+	BUG_ON(bundle.count != 512);
+	/* pr_info("push_bundle: add %lx ([0]=%lx, [511]=%lx)", bundle.stack, */
+	/* 		((struct page**) page_to_virt(bundle.stack))[0], */
+	/* 		((struct page**) page_to_virt(bundle.stack))[511] */
+	/* 	); */
+	llist_add((struct llist_node*) &bundle.stack->mapping, &ctx->global_free_list);
+}
 
-struct exmap_interface {
-	struct mutex		interface_lock;
+struct page_bundle pop_bundle(struct exmap_ctx* ctx) {
+	struct llist_node* first;
+	spin_lock(&ctx->free_list_lock);
+	first = llist_del_first(&ctx->global_free_list);
+	spin_unlock(&ctx->free_list_lock);
+	if (!first) {
+		struct page_bundle ret = {
+			.stack = NULL,
+			.count = 0};
+		/* pr_info("pop_bundle: global free list empty"); */
+		return ret;
+	}
 
-	/* alloc/read/evict/.. counters */
-	struct iface_count count;
-	/* default page steal target (interface) */
-	unsigned int steal_target;
-
-	// Page(s) that are shared with userspace
-	struct exmap_user_interface *usermem;
-
-	// Interface-local free page lock
-	struct free_pages free_pages;
-
-	// Temporary storage used during operations
-	union {
-		struct {
-			// We pre-allocate as many bios, as we would have
-			// exmap_iovs to support scattered single-read pages
-			struct bio     bio[EXMAP_USER_INTERFACE_PAGES];
-			// We pre-allocate as many bio_vecs as one exmap_iov has in length.
-			// Please note: that we would need EXMAP_PAGE_MAX_PAGES/2 structs bio
-			//              to read one sparsely populated area of pages
-			struct bio_vec bio_vecs[EXMAP_PAGE_MAX_PAGES];
-		};
+	struct page* page = container_of((struct address_space**) first, struct page, mapping);
+	struct page_bundle ret = {
+		.stack = page,
+		.count = 512,
 	};
-};
+	/* pr_info("pop_bundle: get %lx ([0]=%lx, [511]=%lx), first was %lx, now %lx", ret.stack, */
+	/* 		((struct page**) page_to_virt(ret.stack))[0], */
+	/* 		((struct page**) page_to_virt(ret.stack))[511], */
+	/* 		first, ctx->global_free_list.first */
+	/* 	); */
+	return ret;
+}
+
+
+void push_page(struct page* page, struct page_bundle* bundle, struct exmap_ctx* ctx) {
+	/* pr_info("push_page: %lx, bundle %lx, count %lu, global %lx", page, bundle, bundle->count, global_free_list); */
+
+	if (!bundle->stack) {
+		bundle->stack = page;
+		return;
+	}
+	void* stack_page_virt = page_to_virt(bundle->stack);
+	((struct page**) stack_page_virt)[bundle->count++] = page;
+	/* pr_info("set entry %lu of virt %lx: %lx", bundle->count-1, stack_page_virt, page); */
+
+	if (bundle->count == 512) {
+		push_bundle(*bundle, ctx);
+		bundle->count = 0;
+		bundle->stack = NULL;
+	}
+}
+
+struct page* pop_page(struct page_bundle* bundle, struct exmap_ctx* ctx) {
+again:
+	/* pr_info("pop_page: bundle %lx, count %lu, global %lx", bundle, bundle->count, global_free_list); */
+	if (bundle->count > 0) {
+		void* stack_page_virt = page_to_virt(bundle->stack);
+		struct page* page = ((struct page**) stack_page_virt)[--bundle->count];
+		/* pr_info("get entry %lu of virt %lx: %lx", bundle->count, stack_page_virt, page); */
+		return page;
+	}
+	if (bundle->stack) {
+		struct page* page = bundle->stack;
+		bundle->stack = NULL;
+		return page;
+	}
+
+	*bundle = pop_bundle(ctx);
+	goto again;
+}
+
 
 ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter);
 
@@ -149,267 +196,99 @@ struct page* exmap_alloc_page_system(void) {
 	return page;
 }
 
-static unsigned int
-choose_and_lock_steal_interface(struct exmap_ctx *ctx,
-									struct exmap_interface *interface,
-									unsigned desired_count) {
-	int i;
-	unsigned int steal_id      = interface->steal_target;
-	struct exmap_interface *steal_it = &ctx->interfaces[steal_id];
-	unsigned steal_free_pages = steal_it->free_pages.count;
-	unsigned int random[2] = {0, 0};
+struct page* exmap_alloc_page_contig(struct exmap_ctx* ctx) {
+	/* BUG_ON(ctx->contig_counter >= ctx->contig_size); */
+	if (ctx->contig_counter >= ctx->contig_size)
+		return NULL;
 
-	// 1. We try to steal from our last interface
-	if (steal_free_pages > desired_count) {
-		if (spin_trylock(&steal_it->free_pages.lock) != 0)
-			return steal_id;
-	}
-
-	// 2. Choose 2 interfaces by random
-	get_random_bytes(&random, sizeof(random));
-
-	/* try the default steal target first */
-	for (i = 0; i < ARRAY_SIZE(random); i++) {
-		unsigned int cand_id = random[i] % ctx->max_interfaces;
-		struct exmap_interface *cand_it = &ctx->interfaces[cand_id];
-		unsigned int cand_free_pages = ctx->interfaces[cand_id].free_pages.count;
-
-		if (cand_free_pages > desired_count)
-			if (spin_trylock(&cand_it->free_pages.lock) != 0)
-				return cand_id;
-
-		if (cand_free_pages >= steal_free_pages) {
-			steal_id = cand_id;
-			steal_it = cand_it;
-			steal_free_pages = cand_free_pages;
-		}
-	}
-
-	spin_lock(&steal_it->free_pages.lock);
-
-	return steal_id;
+	/* NOTE: beware of pointer arithmetic, this adds counter*sizeof(struct page) each time */
+	/* TODO: lock needed? */
+	spin_lock(&ctx->contig_lock);
+	struct page* page = ctx->contig_pages + ctx->contig_counter++;
+	ctx->alloc_count++;
+	spin_unlock(&ctx->contig_lock);
+	/* pr_info("alloc_contig: got page %lx (virt %lx), counter now %u\n", page, page_to_virt(page), ctx->contig_counter); */
+	SetPageReserved(page);
+//	current->rss_stat.count[mm_counter_file(page)] += 1;
+	return page;
 }
 
-static unsigned
-free_pages_move(struct free_pages *src, struct free_pages *dst,
-				unsigned max_pages) {
-	struct list_head *list_ptr;
-	int               src_count = src->count;
-	LIST_HEAD(temp);
+void exmap_free_stack(struct page* stack, unsigned count) {
+	/* interface-local free pages stack can temporarily be NULL until the next page gets pushed */
+	if (!stack)
+		return;
 
-	if (src_count == 0)
-		return 0;
-
-	if (src_count <= max_pages) {
-		// Move all items from src to dst
-		list_splice_init(&src->list, &dst->list);
-		dst->count += src_count;
-		src->count = 0;
-		return src_count;
-	}
-
-	// We steal only a "few" oages
-
-	list_ptr  = &src->list;
-	for (src_count = 0; src_count < max_pages; src_count++) {
-		list_ptr = list_ptr->next;
-	}
-
-	/* remove <steal_count> elements from the victim and add them to the robber's list */
-	list_cut_position(&temp, &src->list, list_ptr);
-	list_splice(&temp, &dst->list);
-
-	src->count -= src_count;
-	dst->count += src_count;
-
-	return src_count;
-}
-
-
-static int
-steal_pages(struct exmap_ctx *ctx,  struct exmap_interface *interface,
-			struct free_pages *dst, unsigned long desired_count) {
-	unsigned int steal_id, first_steal_id;
-	struct exmap_interface *steal_from;
-	unsigned long this_steal_count, steal_count = 0;
-
-
-	/* search for an interface with successful trylock first, enough pages second */
-	first_steal_id = choose_and_lock_steal_interface(ctx, interface, desired_count);
-	steal_id   = first_steal_id;
-	steal_from = &ctx->interfaces[steal_id];
-
-again: // steal_from->free_pages must be locked.
-	// Steal at least half, but not more than what the other has.
-	// FIXME: We need a better strategy how much to steal.
-	this_steal_count = max(desired_count,    steal_from->free_pages.count / 2);
-	this_steal_count = max(desired_count,    512ul);
-	this_steal_count = min(this_steal_count, steal_from->free_pages.count);
-
-	if (this_steal_count > 0) {
-		interface->steal_target = steal_id;
-
-		//pr_info("Steal: %lu -> %lu/%lu => %lu/%lu\n", desired_count, this_steal_count,
-		//		steal_from->free_pages.count,
-		//		steal_count + this_steal_count, desired_count);
-
-		steal_count += free_pages_move(&steal_from->free_pages, dst, this_steal_count);
-		steal_from->count.s++;
-		steal_from->count.p += this_steal_count;
-	}
-
-	spin_unlock(&steal_from->free_pages.lock);
-
-	if (steal_count < desired_count) {
-		do {
-			steal_id = (steal_id + 1) % ctx->max_interfaces;
-			steal_from = &ctx->interfaces[steal_id];
-
-			if (steal_from->free_pages.count > 10) {
-				spin_lock(&steal_from->free_pages.lock);
-				goto again;
-			}
-		} while(steal_id != first_steal_id);
-
-		pr_info("Steal failed finaly: %lu/%lu", steal_count, desired_count);
-		return -ENOMEM;
-	}
-
-	// pr_info("StolenA[%p]: %lu\n", interface, steal_count);
-	return steal_count;
-}
-
-
-
-static int
-exmap_alloc_pages(struct exmap_ctx *ctx,
-				  struct exmap_interface *interface,
-				  struct free_pages *pages,
-				  int min_pages) {
-	int steal_count;
-#ifdef USE_SYSTEM_ALLOC
-#ifdef USE_BULK_SYSTEM_ALLOC
-	unsigned long ret = alloc_pages_bulk_list(GFP_NOIO | __GFP_ZERO, min_pages, &pages->list);
-	/* pr_info("alloc bulk list returned %lu", ret); */
-	if (ret != min_pages)
-		return -ENOMEM;
-	pages->count += ret;
-	return 0;
-#else
-	int i;
-	for (i = 0; i < min_pages; i++) {
-		struct page* page = exmap_alloc_page_system();
-		list_add_tail(&page->lru, &pages->list);
-	}
-	pages->count += min_pages;
-	return 0;
-#endif
-#endif	/* USE_SYSTEM_ALLOC */
-
-	// 1. Try interface-local free list. For this we move at most
-	// min_pages into our output list (pages). Thereby, that list
-	// might be half full afterwards.
-	if (interface->free_pages.count > 0) {
-		spin_lock(&interface->free_pages.lock);
-		steal_count  = free_pages_move(&interface->free_pages, pages, min_pages);
-		// pr_info("local: %d/%d", min_pages, interface->free_pages.count);
-		min_pages   -= steal_count;
-		spin_unlock(&interface->free_pages.lock);
-	}
-
-	if (min_pages == 0)
-		return 0;
-
-	// 2. As long as our memory limit (setup.buffer_size) isn't reached,
-	// we can get a page from the system allocator.
-	while (unlikely(atomic_read(&ctx->alloc_count) < ctx->buffer_size)
-		   && min_pages > 0) {
-		struct page *page = exmap_alloc_page_system();
-		list_add(&page->lru, &pages->list);
-		atomic_inc(&ctx->alloc_count);
-		pages->count++;
-		min_pages --;
-	}
-
-	if (min_pages == 0)
-		return 0;
-
-   
-	// 2. We start to steal pages from other interfaces.
-	steal_count = steal_pages(ctx, interface, pages, min_pages);
-	// pr_info("StolenB[%p]: %d\n", interface, steal_count);
-	if (steal_count < 0)
-		return -ENOMEM;
-
-	min_pages -= steal_count;
-	if (min_pages <= 0)
-		return 0;
-
-	return -ENOMEM;
-}
-
-void exmap_free_page(struct exmap_ctx *ctx,
-					 struct exmap_interface* interface,
-					 struct page * page) {
-/* #if 0 */
-#ifdef USE_SYSTEM_ALLOC
-	exmap_free_page_system(page);
-	return;
-#endif
-
-	spin_lock(&interface->free_pages.lock);
-	list_add(&page->lru, &interface->free_pages.list);
-	interface->free_pages.count ++;
-	spin_unlock(&interface->free_pages.lock);
-	return; // FIXME: We never give memory back
-}
-
-void exmap_free_pages(struct exmap_ctx *ctx,
-					  struct exmap_interface* interface,
-					  struct free_pages *pages) {
-
-/* #if 0 */
-#ifdef USE_SYSTEM_ALLOC
-	struct page * page, *npage;
-	list_for_each_entry_safe(page, npage, &pages->list, lru) {
+	void* stack_page_virt = page_to_virt(stack);
+	while (count > 0) {
+		struct page* page = ((struct page**) stack_page_virt)[--count];
+		/* pr_info("bundle: free page %lx, %d remaining, stack %lx (virt %lx)", page, count, stack, stack_page_virt); */
+		BUG_ON(!page);
+		page->mapping = NULL;
 		exmap_free_page_system(page);
 	}
-	return;
-#endif
-
-	spin_lock(&interface->free_pages.lock);
-	list_splice(&pages->list, &interface->free_pages.list);
-	interface->free_pages.count += pages->count;
-	pages->count = 0;
-	spin_unlock(&interface->free_pages.lock);
-	return;
+	/* pr_info("bundle: free stack page %lx itself", stack); */
+	stack->mapping = NULL;
+	exmap_free_page_system(stack);
 }
 
 static void vm_close(struct vm_area_struct *vma) {
 	struct exmap_ctx *ctx = vma->vm_private_data;
-	unsigned long freed_pages = 0;
-	struct page *page, *npage;
+	unsigned long freed_pages = 0, unlocked_pages = 0;
 	int idx;
 
 	if (!ctx->interfaces)
 		return;
 
+#ifdef USE_CONTIG_ALLOC
+	/* free all (contiguous) pages allocated from the system */
+	unsigned i;
+	for (i = 0; i < ctx->contig_size; i++) {
+		struct page* page = ctx->contig_pages + i;
+		page->mapping = NULL;
+		ClearPageReserved(page);
+	}
+	free_contig_range(page_to_pfn(ctx->contig_pages), ctx->contig_size);
+	freed_pages += ctx->contig_size;
+
+	unlocked_pages = ctx->contig_counter;
+#else
 	// Free all pages in our interfaces
 	for (idx = 0; idx < ctx->max_interfaces; idx++) {
 		struct exmap_interface *interface = &ctx->interfaces[idx];
-		list_for_each_entry_safe(page, npage, &interface->free_pages.list, lru) {
-			exmap_free_page_system(page);
-			freed_pages ++;
-		}
+		exmap_free_stack(interface->local_pages.stack, interface->local_pages.count);
+		freed_pages += interface->local_pages.count + 1;
 	}
 
-	add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * ctx->buffer_size);
+	/* free remaining global list entries */
+	pr_info("vm_close: free global list entries");
+
+	spin_lock(&ctx->free_list_lock);
+	struct llist_node* node = llist_del_all(&ctx->global_free_list);
+	spin_unlock(&ctx->free_list_lock);
+	while (node) {
+		struct page* stack = container_of((struct address_space**) node, struct page, mapping);
+		exmap_free_stack(stack, 512);
+		freed_pages += 513;
+
+		/* When this gets triggered, the global list is corrupted */
+		if (node == node->next) {
+			pr_err("vm_close: circular global list node (%lx) == node->next", node);
+			BUG_ON(node == node->next);
+			break;
+		}
+
+		node = node->next;
+	}
+	unlocked_pages = ctx->buffer_size;
+#endif
+
+	/* add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * ctx->contig_counter); */
 
 	// Raise the locked_vm_pages again
-	exmap_unaccount_mem(ctx, ctx->buffer_size);
+	// exmap_unaccount_mem(ctx, ctx->buffer_size);
 
-	pr_info("vm_close:  freed: %lu, unlock=%ld\n",
-			freed_pages, ctx->buffer_size);
+	pr_info("vm_close:  freed: %lu, unlock=%lu\n",
+			freed_pages, unlocked_pages);
 }
 
 /* First page access. */
@@ -420,21 +299,19 @@ static vm_fault_t vm_fault(struct vm_fault *vmf) {
 	return VM_FAULT_SIGSEGV;
 #else
 	int rc;
-	FREE_PAGES(free_pages);
 	struct vm_area_struct *vma = vmf->vma;
 	struct exmap_ctx *ctx = vma->vm_private_data;
 	struct exmap_interface *interface = &ctx->interfaces[0];
 
-
-	rc = exmap_alloc_pages(ctx, interface, &free_pages,
-						   1);
-	if (rc < 0) return VM_FAULT_SIGSEGV;
+	struct exmap_pages_ctx pages_ctx = {
+		.ctx = ctx,
+		.interface = interface,
+		.pages_count = 1,
+	};
 
 	rc = exmap_insert_pages(vma, (uintptr_t) vmf->address,
-							1, &free_pages, NULL,NULL);
+							1, &pages_ctx, NULL,NULL);
 	if (rc < 0) return VM_FAULT_SIGSEGV;
-
-	exmap_free_pages(ctx, interface, &free_pages);
 
 	return VM_FAULT_NOPAGE;
 #endif
@@ -464,17 +341,18 @@ static void exmap_notifier_release(struct mmu_notifier *mn,
 	struct exmap_ctx *ctx = mmu_notifier_to_exmap(mn);
 
 	if (ctx->interfaces && ctx->exmap_vma) {
-		FREE_PAGES(free_pages);
 		struct vm_area_struct *vma = ctx->exmap_vma;
 		unsigned long pages = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
 
-		rc = exmap_unmap_pages(vma, vma->vm_start, pages, &free_pages);
+		struct exmap_pages_ctx pages_ctx = {
+			.ctx = ctx,
+			.interface = &ctx->interfaces[0],
+			.pages_count = 0,
+		};
+		rc = exmap_unmap_pages(vma, vma->vm_start, pages, &pages_ctx);
 		BUG_ON(rc != 0);
 
-		unmapped_pages = free_pages.count;
-
-		// Give Memory that is still mapped to the first interface
-		exmap_free_pages(ctx, &ctx->interfaces[0], &free_pages);
+		unmapped_pages = pages_ctx.pages_count;
 
 		printk("notifier_release: purged %d pages\n", unmapped_pages);
 	}
@@ -497,7 +375,7 @@ static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
 	unsigned long pfn;
 
 	if (offset == EXMAP_OFF_EXMAP) {
-		// The exmap itsel can only be mapped once.
+		// The exmap itself can only be mapped once.
 		if (ctx->exmap_vma) {
 			return -EBUSY;
 		}
@@ -539,8 +417,7 @@ static void exmap_mem_free(void *ptr, size_t size) {
 
 static void *exmap_mem_alloc(size_t size)
 {
-	gfp_t gfp_flags = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP |
-		__GFP_NORETRY | __GFP_ACCOUNT;
+	gfp_t gfp_flags = GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP | __GFP_NORETRY;
 
 	return (void *) __get_free_pages(gfp_flags, get_order(size));
 }
@@ -553,17 +430,24 @@ static void *exmap_mem_alloc(size_t size)
  * this fallback method and remove it entirely.
  *
  * TODO: verify whether this new ops struct is correct
- * */
+ */
+bool my_noop_dirty_folio(struct address_space *mapping, struct folio *folio) {
+	pr_info("dirty folio, doing nothing\n");
+	return 0;
+}
+void my_noop_invalidate_folio(struct folio *folio, size_t offset, size_t len) {
+	pr_info("invalidate folio, doing nothing\n");
+}
 static const struct address_space_operations dev_exmap_aops = {
-	.dirty_folio		= noop_dirty_folio,
-	.invalidate_folio		= folio_invalidate,
-	.direct_IO              = exmap_read_iter,
+	.dirty_folio			= my_noop_dirty_folio,
+	.invalidate_folio		= my_noop_invalidate_folio,
+	.direct_IO				= exmap_read_iter,
 };
 #else
 static const struct address_space_operations dev_exmap_aops = {
 	.set_page_dirty		= __set_page_dirty_no_writeback,
 	.invalidatepage		= noop_invalidatepage,
-	.direct_IO              = exmap_read_iter,
+	.direct_IO			= exmap_read_iter,
 };
 #endif
 
@@ -587,6 +471,8 @@ static int open(struct inode *inode, struct file *filp) {
 	ctx->max_interfaces = 0;
 	ctx->interfaces = NULL;
 
+	ctx->global_free_list.first = NULL;
+
 	filp->private_data = ctx;
 
 	// Make the character device O_DIRECT
@@ -600,6 +486,7 @@ free_ctx:
 	return rc;
 }
 
+/* FIXME: something here(?) causes bad page state for threads >= 32 (with 16 cores) */
 static int release(struct inode *inode, struct file *filp) {
 	struct exmap_ctx *ctx = filp->private_data;
 
@@ -722,7 +609,6 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	struct vm_area_struct  *vma       = ctx->exmap_vma;
 	unsigned int  iov_len             = params->iov_len;
 	unsigned long nr_pages_alloced    = 0;
-	FREE_PAGES(free_pages);
 	int idx, rc = 0, failed = 0;
 	struct exmap_alloc_ctx alloc_ctx = {
 		.ctx = ctx,
@@ -733,19 +619,36 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	if (iov_len == 0)
 		return failed;
 
-	// Pre-fill our pages store with as many pages as there are
-	// IO-Vectors, assuming that each vector uses at least one page
-	rc = exmap_alloc_pages(ctx, interface, &free_pages,
-						   iov_len);
-	if (rc) {
-		pr_info("First Alloc failed: %d\n", rc);
-		return rc;
+	/* allocate pages from the system if possible */
+	unsigned num_pages = iov_len;
+	while (unlikely(ctx->alloc_count < ctx->buffer_size) && num_pages > 0) {
+#ifdef USE_CONTIG_ALLOC
+		struct page* page = exmap_alloc_page_contig(ctx);
+#else
+		struct page* page = exmap_alloc_page_system();
+		ctx->alloc_count++;
+#endif
+		if (!page) {
+			pr_warn("exmap_alloc: no page, alloc=%lu, alloc_max=%lu, contig=%lu, contig_max=%lu\n",
+				ctx->alloc_count, ctx->buffer_size, ctx->contig_counter, ctx->contig_size);
+			break;
+		}
+		/* pr_info("exmap_alloc: push %lx on %d", page, iface); */
+		push_page(page, &interface->local_pages, ctx);
+		num_pages--;
 	}
 
-	// pr_info("First Alloc: %d\n", free_pages.count);
+	/* add_mm_counter(current->mm, MM_FILEPAGES, iov_len - num_pages); */
+
 
 	// Do we really need this lock?
 	mmap_read_lock(vma->vm_mm);
+
+	struct exmap_pages_ctx pages_ctx = {
+		.ctx = ctx,
+		.interface = interface,
+		.pages_count = iov_len,
+	};
 
 	for (idx = 0; idx < iov_len; idx++) {
 		unsigned long uaddr;
@@ -758,24 +661,13 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 
 		// pr_info("alloc[%d]: off=%llu, len=%d", iface, (uint64_t) vec.page, (int) vec.len);
 
-		// Allocate more memory for ALLOC
-		if (free_pages.count < vec.len) {
-				rc = exmap_alloc_pages(ctx, interface, &free_pages,
-									   vec.len - free_pages.count);
-			if (rc) {
-				failed++;
-				failed = rc;
-				break;
-			}
-		}
-
-		free_pages_before = free_pages.count;
-		rc = exmap_insert_pages(vma, uaddr, vec.len, &free_pages,
+		free_pages_before = pages_ctx.pages_count;
+		rc = exmap_insert_pages(vma, uaddr, vec.len, &pages_ctx,
 								NULL, &alloc_ctx);
 		if (rc < 0) failed++;
 
 		ret.res = rc;
-		ret.pages = (int)(free_pages_before - free_pages.count);
+		ret.pages = (int)(free_pages_before - pages_ctx.pages_count);
 		nr_pages_alloced += ret.pages;
 
 		exmap_debug("alloc: %llu+%d => rc=%d, used=%d",
@@ -784,9 +676,6 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 
 		WRITE_ONCE(interface->usermem->iov[idx], ret);
 	}
-	// free remaining pages into the local interface
-	// pr_info("Free %d (nr_pages_alloced %lu)\n", free_pages.count, nr_pages_alloced);
-	exmap_free_pages(ctx, interface, &free_pages);
 
 	if (alloc_ctx.bio_count > 0)
 		exmap_submit_and_wait(&alloc_ctx);
@@ -806,7 +695,7 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	struct vm_area_struct  *vma       = ctx->exmap_vma;
 	unsigned int  iov_len             = params->iov_len;
 	int idx, rc = 0, failed = 0;
-	FREE_PAGES(free_pages);
+	/* FREE_PAGES(free_pages); */
 
 	if (iov_len == 0)
 		return failed;
@@ -814,25 +703,32 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	// Do we really need this lock?
 	mmap_read_lock(vma->vm_mm);
 
+	struct exmap_pages_ctx pages_ctx = {
+		.ctx = ctx,
+		.interface = interface,
+		.pages_count = 0,
+	};
+
 	for (idx = 0; idx < iov_len; idx++) {
 		struct exmap_iov vec = READ_ONCE(interface->usermem->iov[idx]);
 		unsigned long uaddr = vma->vm_start + (vec.page << PAGE_SHIFT);
-		unsigned long old_free_count = free_pages.count;
+		unsigned long old_free_count = pages_ctx.pages_count;
 
 		/* FIXME what if vec.len == 0 */
 		/* if (vec.len == 0) */
 		/* 	continue; */
 
-		rc = exmap_unmap_pages(vma, uaddr, (int) vec.len, &free_pages);
+
+		rc = exmap_unmap_pages(vma, uaddr, (int) vec.len, &pages_ctx);
 
 		exmap_debug("free[%d]: off=%llu, len=%d, freed: %lu",
 				iface,
 					(uint64_t) vec.page, (int) vec.len,
-					free_pages.count - old_free_count);
+					pages_ctx.pages_count - old_free_count);
 
 		if (rc < 0) failed++;
 		vec.res = rc;
-		vec.pages = free_pages.count - old_free_count;
+		vec.pages = pages_ctx.pages_count - old_free_count;
 
 		interface->count.e += vec.pages;
 
@@ -851,8 +747,6 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 
 	// Update the RSS counter once!
 	// add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * free_pages.count);
-
-	exmap_free_pages(ctx, interface, &free_pages);
 
 	mmap_read_unlock(vma->vm_mm);
 
@@ -894,7 +788,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		if (setup.fd >= 0) {
 			struct file *file = fget(setup.fd);
 			struct inode *inode;
-			
+
 			if (!file) goto out_fput;
 
 			if (!(file->f_flags & O_DIRECT)) {
@@ -933,18 +827,51 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		//     return rc;
 		// }
 		ctx->buffer_size += setup.buffer_size;
+		ctx->alloc_count = 0;
 
 		if (setup.max_interfaces > 256)
 			return -EINVAL;
 
 		ctx->max_interfaces = setup.max_interfaces;
-		gfp_flags = GFP_KERNEL | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP |
-			__GFP_NORETRY | __GFP_ACCOUNT;
-		ctx->interfaces     = kvzalloc(setup.max_interfaces * sizeof(struct exmap_interface), gfp_flags);
+		/* warn if more interfaces are created than there are CPUs */
+		if (num_online_cpus() < setup.max_interfaces) {
+			pr_warn("exmap: More interfaces (%u) than CPUs (%u)\n", setup.max_interfaces, num_online_cpus());
+		}
+
+		/*
+		 * kvmalloc in combination with __GFP_COMP leads to "bad page state" errors
+		 * when freeing the memory again. This is probably due to VM_ALLOW_HUGE_VMAP
+		 * being set in kvmalloc_node (see 3b8000ae185cb068adbda5f966a3835053c85fd4).
+		 *
+		 * We have two options to fix this, either by using __vmalloc derivatives, or
+		 * by removing the __GFP_COMP flag.
+		 */
+		gfp_flags = GFP_KERNEL_ACCOUNT | __GFP_ZERO | __GFP_NOWARN | __GFP_COMP | __GFP_NORETRY;
+		ctx->interfaces = __vmalloc_array(setup.max_interfaces, sizeof(struct exmap_interface), gfp_flags);
 		if (!ctx->interfaces) {
 			pr_info("interfaces failed");
 			return -ENOMEM;
 		}
+
+
+#ifdef USE_CONTIG_ALLOC
+		/* @buffer_size + one page for the bundle/stack for each interface */
+		ctx->contig_size = setup.buffer_size + setup.max_interfaces;
+		ctx->contig_pages = alloc_contig_pages(ctx->contig_size, GFP_NOIO | __GFP_ZERO,
+												first_online_node, NULL);
+		if (!ctx->contig_pages) {
+			pr_info("allocation of %lu contiguous pages failed", setup.buffer_size);
+			return -ENOMEM;
+		}
+		ctx->contig_counter = 0;
+		spin_lock_init(&ctx->contig_lock);
+		exmap_debug("allocated %lu+%lu contiguous pages at %lx\n",
+				setup.buffer_size, setup.max_interfaces, ctx->contig_pages);
+
+#endif
+
+		ctx->global_free_list.first = NULL;
+		spin_lock_init(&ctx->free_list_lock);
 
 		for (idx = 0; idx < ctx->max_interfaces; idx++) {
 			interface = &ctx->interfaces[idx];
@@ -962,18 +889,17 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			interface->count.a = 0;
 			interface->count.e = 0;
 			interface->count.r = 0;
-			interface->count.s = 0;
-			interface->count.p = 0;
-
-			/* set default page steal target to a value chosen by fair dice roll */
-			interface->steal_target = (idx + 4) % ctx->max_interfaces;
 
 			mutex_init(&interface->interface_lock);
-			free_pages_init(&interface->free_pages);
-		}
 
-		// 2. Allocate Memory from the system
-		add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size);
+			interface->local_pages.count = 0;
+#ifdef USE_CONTIG_ALLOC
+			interface->local_pages.stack = exmap_alloc_page_contig(ctx);
+#else
+			interface->local_pages.stack = exmap_alloc_page_system();
+			ctx->alloc_count++;
+#endif
+		}
 
 		break;
 
@@ -1006,19 +932,19 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 ssize_t exmap_alloc_iter(struct exmap_ctx *ctx, struct exmap_interface *interface, struct iov_iter *iter) {
 	ssize_t total_nr_pages = iov_iter_count(iter) >> PAGE_SHIFT;
 	struct iov_iter_state iter_state;
-	FREE_PAGES(free_pages);
 	int rc, rc_all = 0;
-
-	// Allocate Memory for all Vector Entries
-	rc = exmap_alloc_pages(ctx, interface, &free_pages,
-						   total_nr_pages);
-	if (rc < 0) return rc;
 
 	iov_iter_save_state(iter, &iter_state);
 	while (iov_iter_count(iter)) {
 		struct iovec iovec = iov_iter_iovec(iter);
 		char __user* addr = iovec.iov_base;
 		ssize_t size = iovec.iov_len;
+
+		struct exmap_pages_ctx pages_ctx = {
+			.ctx = ctx,
+			.interface = interface,
+			.pages_count = size,
+		};
 
 		//if (iovec.iov_len != iov_iter_count(iter)) {
 		//	pr_info("exmap: BUG we currently support only iovectors of length 1\n");
@@ -1035,7 +961,7 @@ ssize_t exmap_alloc_iter(struct exmap_ctx *ctx, struct exmap_interface *interfac
 			return -EINVAL;
 		}
 		if (((uintptr_t) addr) & ~PAGE_MASK) // Not aligned start
-		{ 
+		{
 			pr_info("addr");
 			return -EINVAL;
 		}
@@ -1046,15 +972,11 @@ ssize_t exmap_alloc_iter(struct exmap_ctx *ctx, struct exmap_interface *interfac
 
 		rc = exmap_insert_pages(ctx->exmap_vma, (uintptr_t) addr,
 								(size >> PAGE_SHIFT),
-								&free_pages, NULL,NULL);
+								&pages_ctx, NULL,NULL);
 		if (rc < 0) return rc;
 		rc_all += rc;
 
 		iov_iter_advance(iter, iovec.iov_len);
-	}
-
-	if (free_pages.count > 0) { // Free the leftover pages
-		exmap_free_pages(ctx, interface, &free_pages);
 	}
 
 	iov_iter_restore(iter, &iter_state);

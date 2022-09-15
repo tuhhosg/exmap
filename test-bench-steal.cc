@@ -27,6 +27,7 @@
 #define DIFFERENT_THREAD
 #endif
 
+// #define USE_LOCKED
 
 uint16_t prepare_vector(struct exmap_user_interface *interface, unsigned spread, unsigned offset) {
 
@@ -70,7 +71,12 @@ int main() {
 	// that have been allocated or freed, meaning they are
 	// ready to be freed or allocated again, respectively
 	LockedQueue<unsigned> oq_a, oq_f;
+	lf_stack<unsigned> s_a, s_f;
 #endif
+
+	struct timespec ts;
+	unsigned long long time_a, time_f;
+	int iterations_a = 0, iterations_f = 0;
 
 	int fd = open("/dev/exmap", O_RDWR);
 	if (fd < 0) die("open");
@@ -116,6 +122,7 @@ int main() {
 			unsigned base_offset = thread_id * EXMAP_USER_INTERFACE_PAGES * 2;
 			while(true) {
 				for (unsigned _offset = 0; _offset < 2; _offset++) {
+					long long unsigned start_ns = time_ns(&ts);
 					unsigned offset = base_offset + _offset;
 					// alloc on one interface
 					uint16_t nr_pages = prepare_vector(interface_a, 2, offset);
@@ -131,7 +138,10 @@ int main() {
 					touch_vector(map, 2, offset);
 
 					readCnt += nr_pages;
+					time_a += time_ns(&ts) - start_ns;
+					iterations_a++;
 
+					start_ns = time_ns(&ts);
 					// free on another interface
 					nr_pages = prepare_vector(interface_f, 2, offset);
 					uint16_t iface = (thread_id + thread_count);
@@ -143,6 +153,8 @@ int main() {
 					if (ioctl(fd, EXMAP_IOCTL_ACTION, &params_free) < 0) {
 						perror("ioctl: exmap_action");
 					}
+					time_f += time_ns(&ts) - start_ns;
+					iterations_f++;
 				} // offset \in {0, 1}
 			}
 		});
@@ -154,7 +166,11 @@ int main() {
 	// free buffer.
 	printf("# %d pages, %d packets\n", MEMORY_POOL_SIZE / EXMAP_USER_INTERFACE_PAGES, alloc_count);
 	for (uint16_t i=0; i < MEMORY_POOL_SIZE / EXMAP_USER_INTERFACE_PAGES-2*alloc_count; i++) {
+#ifdef USE_LOCKED
 		oq_f.push(i * EXMAP_USER_INTERFACE_PAGES);
+#else
+		s_f.push(i * EXMAP_USER_INTERFACE_PAGES);
+#endif
 	}
 
 	for (uint16_t thread_id=0; thread_id < alloc_count; thread_id++) {
@@ -167,9 +183,15 @@ int main() {
 			if (interface == MAP_FAILED) die("mmap");
 
 			while(true) {
+				const long long unsigned start_ns = time_ns(&ts);
 				// we can only (re-)alloc for a base_offset when the corresponding free has finished
 				// if the free is still running: use after free
+#ifdef USE_LOCKED
 				unsigned offset = oq_f.pop();
+#else
+				unsigned offset = s_f.pop();
+#endif
+				// alloc on one interface
 				uint16_t nr_pages = prepare_vector(interface, 1, offset);
 				struct exmap_action_params params_alloc = {
 					.interface = iface,
@@ -182,7 +204,13 @@ int main() {
 
 				touch_vector((volatile char*) map, 1, offset);
 				readCnt += nr_pages;
+#ifdef USE_LOCKED
 				oq_a.push(offset);
+#else
+				s_a.push(offset);
+#endif
+				time_a += time_ns(&ts) - start_ns;
+				iterations_a++;
 			}
 		});
 	}
@@ -196,7 +224,13 @@ int main() {
 			if (interface == MAP_FAILED) die("mmap");
 
 			while(true) {
+				const long long unsigned start_ns = time_ns(&ts);
+#ifdef USE_LOCKED
 				unsigned offset = oq_a.pop();
+#else
+				unsigned offset = s_a.pop();
+#endif
+				// free on another interface
 				uint16_t nr_pages = prepare_vector(interface, 1, offset);
 				struct exmap_action_params params_free = {
 					.interface = iface,
@@ -206,7 +240,13 @@ int main() {
 				if (ioctl(fd, EXMAP_IOCTL_ACTION, &params_free) < 0) {
 					perror("ioctl: exmap_action");
 				}
+#ifdef USE_LOCKED
 				oq_f.push(offset);
+#else
+				s_f.push(offset);
+#endif
+				time_f += time_ns(&ts) - start_ns;
+				iterations_f++;
 			}
 		});
 	}
@@ -222,6 +262,17 @@ int main() {
 		auto lastReadCnt = (unsigned)readCnt.exchange(0);
 		output_line(secs++, lastReadCnt, diff);
 		last_shootdowns= shootdowns;
+
+		if (iterations_a >= 1e5) {
+			// printf("# alloc took avg %llu ns after %d iterations\n", time_a / iterations_a, iterations_a);
+			iterations_a = 0;
+			time_a = 0;
+		}
+		if (iterations_f >= 1e5) {
+			// printf("# free took avg %llu ns after %d iterations\n", time_f / iterations_f, iterations_f);
+			iterations_f = 0;
+			time_f = 0;
+		}
 	}
 
 

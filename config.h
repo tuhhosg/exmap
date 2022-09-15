@@ -6,4 +6,5 @@
 #define BATCH_TLB_FLUSH
 // #define HANDLE_PAGE_FAULT
 
+// #define USE_CONTIG_ALLOC
 
