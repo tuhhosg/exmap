@@ -4,7 +4,7 @@
 #include <linux/list.h>
 #include <linux/blk_types.h>
 
-#include "exmap_common.h"
+#include "linux/exmap.h"
 
 
 struct page_bundle {
