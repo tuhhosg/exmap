@@ -1,6 +1,6 @@
 #pragma once
 #include <asm/ioctl.h>
-
+#include <linux/types.h>
 
 #define STATIC_ASSERT(COND,MSG) typedef char static_assertion_##MSG[(!!(COND))*2-1]
 
@@ -63,27 +63,9 @@ enum exmap_flags {
 };
 typedef enum exmap_flags exmap_flags;
 
-struct exmap_action_params {
-	uint16_t interface;
-	uint16_t iov_len;
-	uint16_t opcode; // exmap_opcode
-	uint64_t flags;  // exmap_flags
-};
-
-#define EXMAP_IOCTL_ACTION _IOC(_IOC_WRITE, 'k', 2, sizeof(struct exmap_action_params))
 
 
 #define EXMAP_OFF_EXMAP       0x0000
 #define EXMAP_OFF_INTERFACE_BASE 0xe000000000000000UL
 #define EXMAP_OFF_INTERFACE_MAX  0xf000000000000000UL
 #define EXMAP_OFF_INTERFACE(n) (EXMAP_OFF_INTERFACE_BASE | (n << 12LL))
-
-#ifndef EXMAP_IN_KERNEL
-
-#include <sys/ioctl.h>
-
-int exmap_action(int fd, struct exmap_action_params *params) {
-	return ioctl(fd, EXMAP_IOCTL_ACTION, params);
-}
-
-#endif

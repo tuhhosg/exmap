@@ -20,7 +20,6 @@
 
 
 
-#include "linux/exmap.h"
 #include "bench_common.h"
 
 #if !defined(SAME_THREAD) && !defined(DIFFERENT_THREAD)

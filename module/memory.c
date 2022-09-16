@@ -5,7 +5,7 @@
 #include <asm/cacheflush.h>
 #include <linux/memcontrol.h>
 
-#include "exmap.h"
+#include "driver.h"
 #include "config.h"
 
 
@@ -455,7 +455,7 @@ int exmap_insert_pages(struct vm_area_struct *vma, unsigned long addr,
 						vma->vm_page_prot, cb, data);
 }
 
-EXPORT_SYMBOL(exmap_insert_pages);
+/* EXPORT_SYMBOL(exmap_insert_pages); */
 
 
 ////////////////////////////////////////////////////////////////

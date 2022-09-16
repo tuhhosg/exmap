@@ -26,11 +26,11 @@
 
 #include <asm/tlbflush.h>
 
-#include "linux/version.h"
+#include <linux/version.h>
 
-#define EXMAP_IN_KERNEL
 #include "linux/exmap.h"
-#include "exmap.h"
+#include "exmap_common.h"
+#include "driver.h"
 #include "ksyms.h"
 #include "config.h"
 
