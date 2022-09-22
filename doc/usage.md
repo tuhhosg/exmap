@@ -1,4 +1,4 @@
-## Usage
+## Usage (possibly outdated)
 - loading module provides /dev/exmap
 - interact with it from an application via `ioctl`
 - include `linux/exmap.h`

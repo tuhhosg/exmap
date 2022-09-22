@@ -1,4 +1,4 @@
-## Repository file structure
+## Repository file structure (possibly outdated)
 Important files:
 
 - driver.c: main implementation
