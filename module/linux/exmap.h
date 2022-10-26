@@ -21,11 +21,6 @@ struct exmap_iov {
 			int32_t   res;
 			int16_t   pages;
 		};
-		struct {
-			int16_t victim;
-			int16_t robber;
-			uint32_t count;
-		};
 	};
 };
 STATIC_ASSERT(sizeof(struct exmap_iov) == 8, exmap_iov);
@@ -46,7 +41,14 @@ struct exmap_ioctl_setup {
 
 #define EXMAP_IOCTL_SETUP _IOC(_IOC_WRITE, 'k', 1, sizeof(struct exmap_ioctl_setup))
 
+struct exmap_action_params {
+	uint16_t interface;
+	uint16_t iov_len;
+	uint16_t opcode; // exmap_opcode
+	uint64_t flags;  // exmap_flags
+};
 
+#define EXMAP_IOCTL_ACTION _IOC(_IOC_WRITE, 'k', 2, sizeof(struct exmap_action_params))
 
 
 

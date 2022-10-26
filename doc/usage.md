@@ -1,4 +1,4 @@
-## Usage (possibly outdated)
+## Usage
 - loading module provides /dev/exmap
 - interact with it from an application via `ioctl`
 - include `linux/exmap.h`
@@ -9,7 +9,7 @@
 - create interface
 - `ioctl` with different opcodes
 
-## Implementation structure
+## Implementation structure (possibly outdated)
 On module load: `exmap_init_module`.
 
 - `exmap_acquire_ksyms`: get function pointers that are not exported by the kernel via kallsyms

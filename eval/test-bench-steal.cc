@@ -19,7 +19,6 @@
 #include <boost/algorithm/string.hpp>
 
 
-
 #include "bench_common.h"
 
 #if !defined(SAME_THREAD) && !defined(DIFFERENT_THREAD)

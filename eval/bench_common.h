@@ -2,11 +2,6 @@
 
 #include <sys/ioctl.h>
 #include <linux/exmap.h>
-#include "../module/exmap_common.h"
-
-// int exmap_action(int fd, struct exmap_action_params *params) {
-// 	return ioctl(fd, EXMAP_IOCTL_ACTION, params);
-// }
 
 #include <iostream>
 #include <fstream>

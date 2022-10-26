@@ -88,7 +88,7 @@ int main() {
 
     printf("# BATCH_SIZE: %d\n", batch_size);
 	printf("# THREADS: %d\n", thread_count);
-	printf("# MODE: %d\n", thread_count);
+	printf("# MODE: %d\n", mode);
 	printf("# MAP: %p-%p\n", map, map + MAP_SIZE);
 
 	// must fail!

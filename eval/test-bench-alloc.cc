@@ -18,7 +18,6 @@
 #include <sstream>
 #include <boost/algorithm/string.hpp>
 
-#include "linux/exmap.h"
 #include "bench_common.h"
 
 int batch_size = EXMAP_USER_INTERFACE_PAGES;

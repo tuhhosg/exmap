@@ -1,15 +1,16 @@
-## Repository file structure (possibly outdated)
-Important files:
+## Repository file structure
+### Module
 
-- driver.c: main implementation
+- driver.c/h: main implementation
 - memory.c: C-c C-v from linux kernel memory.c, adapted
-- ksyms.c/ksyms.h: get non-exported functions
+- ksyms.c/h: get non-exported functions
 - exmap.h: includes for the kernel module
 - linux/exmap.h: includes for applications using exmap
+- config.h: configuration options, mostly for testing purposes
 
-Test/Benchmark files:
+### Evaluation
 
 - test-exmap.cc: test the basic functionality of exmap (create/alloc/free)
-- test-bench-alloc.cc: basic allocation/free benchmark (seen in the paper in Figure 8: exmap (1IF))
-- test-bench-steal.cc: for alloc with stealing (Figure 8: exmap (2IF) `ifdef SAME_THREAD`, exmap (pool) otherwise)
-- bench\_common.h: functions/classes/... used by multiple benchmark programs
+- test-bench-alloc.cc/test-bench-steal.cc: allocation/free benchmark with one or two interfaces per thread, or a pool of threads allocating and freeing from and to shared lists
+- test-bench-read.cc: test different usages of exmap with pread
+- bench_common.h: functions/classes/... used by multiple benchmark programs
