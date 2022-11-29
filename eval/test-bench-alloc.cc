@@ -44,6 +44,7 @@ int touch_vector(char *exmap, unsigned offset, unsigned count) {
 
 int main() {
 	std::atomic<uint64_t> readCnt(0);
+	std::atomic<unsigned long long> timeDiff(0);
 
 	int thread_count = atoi(getenv("THREADS") ?: "1");
 
@@ -91,13 +92,16 @@ int main() {
 			if (interface == MAP_FAILED) die("mmap");
 
 			unsigned base_offset = thread_id * 2 * EXMAP_USER_INTERFACE_PAGES;
+
+			struct timespec ts;
+			uint64_t t_start, t_end;
 			while(true) {
 				unsigned offset = 0;
 				while (offset < EXMAP_USER_INTERFACE_PAGES) {
 					unsigned start = base_offset + offset;
 					unsigned count = std::min((unsigned)batch_size, EXMAP_USER_INTERFACE_PAGES - offset);
 
-					if (count == 1) {
+					if (count == 0) {
 						if (pread(fd, &map[start * PAGE_SIZE], PAGE_SIZE, thread_id | (EXMAP_OP_ALLOC << 8)) != PAGE_SIZE) {
 							perror("pread: exmap_alloc");
 						}
@@ -108,15 +112,19 @@ int main() {
 							.iov_len   = nr_pages,
 							.opcode    = EXMAP_OP_ALLOC,
 						};
+
+						t_start = time_ns(&ts);
 						if (ioctl(fd, EXMAP_IOCTL_ACTION, &params_alloc) < 0) {
 							perror("ioctl: exmap_action");
 						}
+						t_end = time_ns(&ts);
 					}
 
 					touch_vector(map, start, count);
 
 					readCnt += count;
 					offset  += count;
+					timeDiff += t_end - t_start;
 				}
 				assert(offset == EXMAP_USER_INTERFACE_PAGES);
 				uint16_t nr_pages = prepare_vector(interface, base_offset, EXMAP_USER_INTERFACE_PAGES);
@@ -140,7 +148,11 @@ int main() {
 		auto shootdowns = readTLBShootdownCount();
 		auto diff = (shootdowns-last_shootdowns);
 		auto lastReadCnt = (unsigned)readCnt.exchange(0);
+		auto thisTimeDiff = timeDiff.exchange(0);
 		output_line(secs++, lastReadCnt, diff);
+		printf("alloc in %llu ns (%llu ns per core)\n",
+			   thisTimeDiff / lastReadCnt,
+			   thisTimeDiff / (lastReadCnt * thread_count));
 		last_shootdowns = shootdowns;
 	}
 
