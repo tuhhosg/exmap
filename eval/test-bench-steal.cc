@@ -25,7 +25,30 @@
 #define DIFFERENT_THREAD
 #endif
 
-// #define USE_LOCKED
+// #define USE_LOCKED_SYNC
+
+// For the thread pool, the offsets at which allocations or frees
+// have been performed by other threads have to be synchronized.
+//
+// If USE_LOCKED_SYNC is set, this is done with a locked queue,
+// otherwise with a lock-free CAS-based stack
+#ifdef USE_LOCKED_SYNC
+#define PUSH_OFFSET(kind, offs) \
+	do { \
+			oq_##kind.push(offs); \
+	} while (0);
+#define POP_OFFSET(kind) \
+	oq_##kind.pop();
+
+#else  // NOT USE_LOCKED_SYNC
+
+#define PUSH_OFFSET(kind, offs) \
+	do { \
+			s_##kind.push(offs); \
+	} while (0);
+#define POP_OFFSET(kind) \
+	s_##kind.pop();
+#endif
 
 uint16_t prepare_vector(struct exmap_user_interface *interface, unsigned spread, unsigned offset) {
 
@@ -160,15 +183,10 @@ int main() {
 #endif
 
 #ifdef DIFFERENT_THREAD
-	// We will the free queue with every page that we've put into the
-	// free buffer.
+	// Initialize the free queue with every page that we've put into the free buffer.
 	printf("# %d pages, %d packets\n", MEMORY_POOL_SIZE / EXMAP_USER_INTERFACE_PAGES, alloc_count);
-	for (uint16_t i=0; i < MEMORY_POOL_SIZE / EXMAP_USER_INTERFACE_PAGES-2*alloc_count; i++) {
-#ifdef USE_LOCKED
-		oq_f.push(i * EXMAP_USER_INTERFACE_PAGES);
-#else
-		s_f.push(i * EXMAP_USER_INTERFACE_PAGES);
-#endif
+	for (uint16_t i = 0; i < MEMORY_POOL_SIZE / EXMAP_USER_INTERFACE_PAGES; i++) {
+		PUSH_OFFSET(f, i * EXMAP_USER_INTERFACE_PAGES);
 	}
 
 	for (uint16_t thread_id=0; thread_id < alloc_count; thread_id++) {
@@ -184,11 +202,7 @@ int main() {
 				const long long unsigned start_ns = time_ns(&ts);
 				// we can only (re-)alloc for a base_offset when the corresponding free has finished
 				// if the free is still running: use after free
-#ifdef USE_LOCKED
-				unsigned offset = oq_f.pop();
-#else
-				unsigned offset = s_f.pop();
-#endif
+				unsigned offset = POP_OFFSET(f);
 				// alloc on one interface
 				uint16_t nr_pages = prepare_vector(interface, 1, offset);
 				struct exmap_action_params params_alloc = {
@@ -202,11 +216,8 @@ int main() {
 
 				touch_vector((volatile char*) map, 1, offset);
 				readCnt += nr_pages;
-#ifdef USE_LOCKED
-				oq_a.push(offset);
-#else
-				s_a.push(offset);
-#endif
+
+				PUSH_OFFSET(a, offset);
 				time_a += time_ns(&ts) - start_ns;
 				iterations_a++;
 			}
@@ -223,11 +234,7 @@ int main() {
 
 			while(true) {
 				const long long unsigned start_ns = time_ns(&ts);
-#ifdef USE_LOCKED
-				unsigned offset = oq_a.pop();
-#else
-				unsigned offset = s_a.pop();
-#endif
+				unsigned offset = POP_OFFSET(a);
 				// free on another interface
 				uint16_t nr_pages = prepare_vector(interface, 1, offset);
 				struct exmap_action_params params_free = {
@@ -238,11 +245,7 @@ int main() {
 				if (ioctl(fd, EXMAP_IOCTL_ACTION, &params_free) < 0) {
 					perror("ioctl: exmap_action");
 				}
-#ifdef USE_LOCKED
-				oq_f.push(offset);
-#else
-				s_f.push(offset);
-#endif
+				PUSH_OFFSET(f, offset);
 				time_f += time_ns(&ts) - start_ns;
 				iterations_f++;
 			}
