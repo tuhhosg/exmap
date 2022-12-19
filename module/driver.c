@@ -68,6 +68,8 @@ struct exmap_ctx {
 	struct llist_head global_free_list;
 	spinlock_t free_list_lock;
 
+	struct exmap_pagemap* pagemap;
+
 	struct mmu_notifier mmu_notifier;
 };
 
@@ -142,6 +144,39 @@ again:
 
 	*bundle = pop_bundle(ctx);
 	goto again;
+}
+
+void update_pagemap_bit(struct exmap_ctx* ctx, unsigned long idx, bool state) {
+	if (idx >= ctx->buffer_size) {
+		pr_err("index into pagemap too large? idx=%ld, buffer_size=%ld", idx, ctx->buffer_size);
+	}
+
+	/* TODO: why don't set_/clear_bit work as intended? */
+	if (state) {
+		/* set_bit(idx, ctx->pagemap->data); */
+		my_set_bit(idx, ctx->pagemap->data);
+	} else {
+		/* clear_bit(idx, ctx->pagemap->data); */
+		my_clear_bit(idx, ctx->pagemap->data);
+	}
+}
+
+void output_page_status(struct exmap_ctx* ctx) {
+	int idx = 0;
+	struct vm_area_struct* vma = ctx->exmap_vma;
+	unsigned long first_addr_virt = vma->vm_start;
+	unsigned long last_addr_virt = vma->vm_end;
+	unsigned long pages = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
+	pr_info("first addr: %lx, last addr: %lx, count: %lu\n", first_addr_virt, last_addr_virt, pages);
+
+	for (unsigned long vaddr = vma->vm_start; vaddr <= vma->vm_end; vaddr += PAGE_SIZE, idx++) {
+		pmd_t* pmd = walk_to_pmd(vma->vm_mm, vaddr);
+		pte_t* ptep = pte_offset_map(pmd, vaddr);
+		update_pagemap_bit(ctx, idx, pte_present(*ptep));
+
+		/* pr_info("page %d: vaddr=%lx ptep=%lx present=%d page=%lx\n", idx, vaddr, ptep, */
+		/* 		pte_present(*ptep) == 1, pte_present(*ptep) == 1 ? pte_page(*ptep) : NULL); */
+	}
 }
 
 
@@ -292,6 +327,7 @@ static void vm_close(struct vm_area_struct *vma) {
 
 /* First page access. */
 static vm_fault_t vm_fault(struct vm_fault *vmf) {
+	output_page_status(vmf->vma->vm_private_data);
 #ifndef HANDLE_PAGE_FAULT // The default
 	pr_info("vm_fault: off=%ld\n", vmf->pgoff);
 	// We forbid the implicit page fault interface
@@ -402,6 +438,10 @@ static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
 		// Map the struct exmap_user_interface into the userspace
 		pfn = virt_to_phys(interface->usermem) >> PAGE_SHIFT;
 		return remap_pfn_range(vma, vma->vm_start, pfn, sz, vma->vm_page_prot);
+	} else if (offset >= EXMAP_OFF_PAGEMAP && offset <= EXMAP_OFF_PAGEMAP_MAX) {
+		pr_info("mmap pagemap: sz=%ld, actual size=%ld\n", sz, PGMP_SIZE(ctx->buffer_size));
+		pfn = virt_to_phys(ctx->pagemap->data) >> PAGE_SHIFT;
+		return remap_pfn_range(vma, vma->vm_start, pfn, sz, PAGE_READONLY);
 	} else {
 		return -EINVAL;
 	}
@@ -508,6 +548,7 @@ static int release(struct inode *inode, struct file *filp) {
 	pr_info("release\n");
 
 
+	exmap_mem_free(ctx->pagemap, sizeof(struct exmap_pagemap));
 	kfree(ctx);
 	filp->private_data = NULL;
 	return 0;
@@ -663,6 +704,7 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 		free_pages_before = pages_ctx.pages_count;
 		rc = exmap_insert_pages(vma, uaddr, vec.len, &pages_ctx,
 								NULL, &alloc_ctx);
+		update_pagemap_bit(ctx, vec.page, 1);
 		if (rc < 0) failed++;
 
 		ret.res = rc;
@@ -719,6 +761,7 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 
 
 		rc = exmap_unmap_pages(vma, uaddr, (int) vec.len, &pages_ctx);
+		update_pagemap_bit(ctx, vec.page, 0);
 
 		exmap_debug("free[%d]: off=%llu, len=%d, freed: %lu",
 				iface,
@@ -852,6 +895,13 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			return -ENOMEM;
 		}
 
+		ctx->pagemap = exmap_mem_alloc(sizeof(struct exmap_pagemap));
+		if (!ctx->pagemap) {
+			pr_info("pagemap alloc failed");
+			return -ENOMEM;
+		}
+		/* pr_info("setup: %ld byte pagemap for %ld pages, pagemap datap is %lx", */
+		/* 		PGMP_SIZE(ctx->buffer_size), ctx->buffer_size, ctx->pagemap->data); */
 
 #ifdef USE_CONTIG_ALLOC
 		/* @buffer_size + one page for the bundle/stack for each interface */

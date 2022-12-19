@@ -73,3 +73,4 @@ int exmap_unmap_pages(struct vm_area_struct *vma,
 // #define exmap_debug(...) pr_info("exmap:" __VA_ARGS__)
 #define exmap_debug(...) 
 
+pmd_t *walk_to_pmd(struct mm_struct *mm, unsigned long addr);

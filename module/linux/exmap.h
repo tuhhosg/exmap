@@ -66,9 +66,38 @@ enum exmap_flags {
 };
 typedef enum exmap_flags exmap_flags;
 
+struct exmap_pagemap {
+	/* TODO: shouldn't be fixed size */
+	unsigned long data[512];
+};
+
+
+#ifndef __KERNEL__
+#define BITS_PER_LONG 64
+#endif
+/**
+ * @return the pagemap size in Bytes
+ **/
+static inline size_t PGMP_SIZE(unsigned long num_pages) {
+	/* either the bitmap fits, or we have to add a whole nother unsigned long */
+	unsigned long remainder = !!(num_pages % BITS_PER_LONG) * sizeof(unsigned long);
+	return num_pages / BITS_PER_LONG + remainder;
+}
+
+static inline int my_get_bit(unsigned long idx, unsigned long* addr) {
+	return !!(addr[idx / BITS_PER_LONG] & (1 << (idx % BITS_PER_LONG)));
+}
+static inline void my_set_bit(unsigned long idx, unsigned long* addr) {
+	addr[idx / BITS_PER_LONG] |= (1 << (idx % BITS_PER_LONG));
+}
+static inline void my_clear_bit(unsigned long idx, unsigned long* addr) {
+	addr[idx / BITS_PER_LONG] &= ~(1 << (idx % BITS_PER_LONG));
+}
 
 
 #define EXMAP_OFF_EXMAP       0x0000
 #define EXMAP_OFF_INTERFACE_BASE 0xe000000000000000UL
 #define EXMAP_OFF_INTERFACE_MAX  0xf000000000000000UL
+#define EXMAP_OFF_PAGEMAP 0xf100000000000000UL
+#define EXMAP_OFF_PAGEMAP_MAX 0xff00000000000000UL
 #define EXMAP_OFF_INTERFACE(n) (EXMAP_OFF_INTERFACE_BASE | (n << 12LL))

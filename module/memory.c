@@ -234,7 +234,7 @@ pmd_t * exmap_pmd_offset_alloc(
 }
 
 
-static pmd_t *walk_to_pmd(struct mm_struct *mm, unsigned long addr)
+pmd_t *walk_to_pmd(struct mm_struct *mm, unsigned long addr)
 {
 	pgd_t *pgd;
 	p4d_t *p4d;

@@ -39,7 +39,18 @@ int touch_vector(char *exmap, unsigned offset, unsigned count) {
 	return count;
 }
 
+struct exmap_pagemap* pagemap;
+int pagemap_get(unsigned long idx) {
+	return my_get_bit(idx, pagemap->data);
+}
 
+void dump_pagemap(size_t size) {
+	printf("======== %ld pagemap values: ========\n", size);
+	for (size_t i = 0; i < size; i++) {
+		printf("%d, ", pagemap_get(i));
+	}
+	printf("\n================\n");
+}
 
 
 int main() {
@@ -59,7 +70,7 @@ int main() {
     int fd = open("/dev/exmap", O_RDWR);
     if (fd < 0) die("open");
 
-	const size_t MAP_SIZE = thread_count * 8 * 1024 * 1024;
+	const size_t MAP_SIZE = thread_count * 2 * 1024 * PAGE_SIZE;
 	char *map = (char*) mmap(NULL, MAP_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
 	if (map == MAP_FAILED) die("mmap");
 
@@ -79,6 +90,11 @@ int main() {
 		return 0;
 		/* handle error */
 	}
+
+	pagemap = (struct exmap_pagemap*) mmap(NULL, PGMP_SIZE(buffer.buffer_size),
+										   PROT_READ, MAP_SHARED, fd, EXMAP_OFF_PAGEMAP);
+	if (pagemap->data == MAP_FAILED)
+		die("pagemap mmap");
 
 	std::vector<std::thread> threads;
 	////////////////////////////////////////////////////////////////
@@ -150,10 +166,13 @@ int main() {
 		auto lastReadCnt = (unsigned)readCnt.exchange(0);
 		auto thisTimeDiff = timeDiff.exchange(0);
 		output_line(secs++, lastReadCnt, diff);
-		printf("alloc in %llu ns (%llu ns per core)\n",
-			   thisTimeDiff / lastReadCnt,
-			   thisTimeDiff / (lastReadCnt * thread_count));
+		// printf("alloc in %llu ns (%llu ns per core)\n",
+		// 	   thisTimeDiff / lastReadCnt,
+		// 	   thisTimeDiff / (lastReadCnt * thread_count));
 		last_shootdowns = shootdowns;
+		// printf("# pagemap[0,1,last]: %d %d %d\n", pagemap_get(0), pagemap_get(1), pagemap_get(buffer.buffer_size - 1));
+		printf("pagemap at %lx, data at %lx, data[0]=%lx\n", &pagemap, &pagemap->data, pagemap->data[0]);
+		// dump_pagemap(buffer.buffer_size);
 	}
 
 
