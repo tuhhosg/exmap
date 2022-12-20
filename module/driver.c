@@ -525,7 +525,6 @@ free_ctx:
 	return rc;
 }
 
-/* FIXME: something here(?) causes bad page state for threads >= 32 (with 16 cores) */
 static int release(struct inode *inode, struct file *filp) {
 	struct exmap_ctx *ctx = filp->private_data;
 
@@ -548,7 +547,7 @@ static int release(struct inode *inode, struct file *filp) {
 	pr_info("release\n");
 
 
-	exmap_mem_free(ctx->pagemap, sizeof(struct exmap_pagemap));
+	exmap_mem_free(ctx->pagemap, PGMP_SIZE(ctx->buffer_size));
 	kfree(ctx);
 	filp->private_data = NULL;
 	return 0;
@@ -895,13 +894,13 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			return -ENOMEM;
 		}
 
-		ctx->pagemap = exmap_mem_alloc(sizeof(struct exmap_pagemap));
+		ctx->pagemap = exmap_mem_alloc(PGMP_SIZE(ctx->buffer_size));
 		if (!ctx->pagemap) {
 			pr_info("pagemap alloc failed");
 			return -ENOMEM;
 		}
-		/* pr_info("setup: %ld byte pagemap for %ld pages, pagemap datap is %lx", */
-		/* 		PGMP_SIZE(ctx->buffer_size), ctx->buffer_size, ctx->pagemap->data); */
+		pr_info("setup: %ld byte pagemap for %ld pages, pagemap at %lx",
+				PGMP_SIZE(ctx->buffer_size), ctx->buffer_size, ctx->pagemap);
 
 #ifdef USE_CONTIG_ALLOC
 		/* @buffer_size + one page for the bundle/stack for each interface */

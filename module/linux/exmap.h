@@ -67,8 +67,7 @@ enum exmap_flags {
 typedef enum exmap_flags exmap_flags;
 
 struct exmap_pagemap {
-	/* TODO: shouldn't be fixed size */
-	unsigned long data[512];
+	unsigned long data[0];
 };
 
 
@@ -80,8 +79,8 @@ struct exmap_pagemap {
  **/
 static inline size_t PGMP_SIZE(unsigned long num_pages) {
 	/* either the bitmap fits, or we have to add a whole nother unsigned long */
-	unsigned long remainder = !!(num_pages % BITS_PER_LONG) * sizeof(unsigned long);
-	return num_pages / BITS_PER_LONG + remainder;
+	unsigned long remainder = !!(num_pages % BITS_PER_LONG);
+	return (num_pages / BITS_PER_LONG + remainder) * sizeof(unsigned long);
 }
 
 static inline int my_get_bit(unsigned long idx, unsigned long* addr) {

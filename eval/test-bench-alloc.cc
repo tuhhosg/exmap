@@ -170,8 +170,6 @@ int main() {
 		// 	   thisTimeDiff / lastReadCnt,
 		// 	   thisTimeDiff / (lastReadCnt * thread_count));
 		last_shootdowns = shootdowns;
-		// printf("# pagemap[0,1,last]: %d %d %d\n", pagemap_get(0), pagemap_get(1), pagemap_get(buffer.buffer_size - 1));
-		printf("pagemap at %lx, data at %lx, data[0]=%lx\n", &pagemap, &pagemap->data, pagemap->data[0]);
 		// dump_pagemap(buffer.buffer_size);
 	}
 
