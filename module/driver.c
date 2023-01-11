@@ -285,6 +285,8 @@ static void vm_close(struct vm_area_struct *vma) {
 
 	// Raise the locked_vm_pages again
 	// exmap_unaccount_mem(ctx, ctx->buffer_size);
+	
+	ctx->exmap_vma = NULL;
 
 	pr_info("vm_close:  freed: %lu, unlock=%lu\n",
 			freed_pages, unlocked_pages);
@@ -365,6 +367,13 @@ static int exmap_mmu_notifier(struct exmap_ctx *ctx)
 {
 	ctx->mmu_notifier.ops = &mn_opts;
 	return mmu_notifier_register(&ctx->mmu_notifier, current->mm);
+}
+
+static void exmap_mmu_notifier_unregister(struct exmap_ctx *ctx)
+{
+	if (current->mm) {
+		mmu_notifier_unregister(&ctx->mmu_notifier, current->mm);
+	}
 }
 
 static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
@@ -504,6 +513,8 @@ static int release(struct inode *inode, struct file *filp) {
 		}
 		kvfree(ctx->interfaces);
 	}
+
+	exmap_mmu_notifier_unregister(ctx);
 
 	pr_info("release\n");
 
