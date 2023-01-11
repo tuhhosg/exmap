@@ -285,6 +285,8 @@ static void vm_close(struct vm_area_struct *vma) {
 
 	// Raise the locked_vm_pages again
 	// exmap_unaccount_mem(ctx, ctx->buffer_size);
+	
+	ctx->exmap_vma = NULL;
 
 	pr_info("vm_close:  freed: %lu, unlock=%lu\n",
 			freed_pages, unlocked_pages);
