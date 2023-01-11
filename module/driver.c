@@ -367,6 +367,13 @@ static int exmap_mmu_notifier(struct exmap_ctx *ctx)
 	return mmu_notifier_register(&ctx->mmu_notifier, current->mm);
 }
 
+static void exmap_mmu_notifier_unregister(struct exmap_ctx *ctx)
+{
+	if (current->mm) {
+		mmu_notifier_unregister(&ctx->mmu_notifier, current->mm);
+	}
+}
+
 static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
 	struct exmap_ctx *ctx = file->private_data;
 	loff_t offset = vma->vm_pgoff << PAGE_SHIFT;
@@ -504,6 +511,8 @@ static int release(struct inode *inode, struct file *filp) {
 		}
 		kvfree(ctx->interfaces);
 	}
+
+	exmap_mmu_notifier_unregister(ctx);
 
 	pr_info("release\n");
 
