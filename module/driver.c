@@ -406,7 +406,9 @@ static void vm_close(struct vm_area_struct *vma) {
 	add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * ctx->buffer_size);
 
 	// Raise the locked_vm_pages again
-	exmap_unaccount_mem(ctx, ctx->buffer_size);
+	// exmap_unaccount_mem(ctx, ctx->buffer_size);
+
+	ctx->exmap_vma = NULL;
 
 	pr_info("vm_close:  freed: %lu, unlock=%ld\n",
 			freed_pages, ctx->buffer_size);
