@@ -340,31 +340,47 @@ static inline struct exmap_ctx *mmu_notifier_to_exmap(struct mmu_notifier *mn)
 	return container_of(mn, struct exmap_ctx, mmu_notifier);
 }
 
+static void exmap_vma_cleanup(struct exmap_ctx *ctx, unsigned long start, unsigned long end) {
+	unsigned long rc, unmapped_pages;
+
+	struct vm_area_struct *vma = ctx->exmap_vma;
+	unsigned long pages = (end - start) >> PAGE_SHIFT;
+
+	struct exmap_pages_ctx pages_ctx = {
+		.ctx = ctx,
+		.interface = &ctx->interfaces[0],
+		.pages_count = 0,
+	};
+	rc = exmap_unmap_pages(vma, vma->vm_start, pages, &pages_ctx);
+	BUG_ON(rc != 0);
+
+	unmapped_pages = pages_ctx.pages_count;
+
+	printk("notifier cleanup: purged %d pages\n", unmapped_pages);
+}
+
 static void exmap_notifier_release(struct mmu_notifier *mn,
 								   struct mm_struct *mm) {
-	int rc, unmapped_pages;
 	struct exmap_ctx *ctx = mmu_notifier_to_exmap(mn);
 
 	if (ctx->interfaces && ctx->exmap_vma) {
-		struct vm_area_struct *vma = ctx->exmap_vma;
-		unsigned long pages = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
-
-		struct exmap_pages_ctx pages_ctx = {
-			.ctx = ctx,
-			.interface = &ctx->interfaces[0],
-			.pages_count = 0,
-		};
-		rc = exmap_unmap_pages(vma, vma->vm_start, pages, &pages_ctx);
-		BUG_ON(rc != 0);
-
-		unmapped_pages = pages_ctx.pages_count;
-
-		printk("notifier_release: purged %d pages\n", unmapped_pages);
+		exmap_vma_cleanup(ctx, ctx->exmap_vma->vm_start, ctx->exmap_vma->vm_end);
 	}
+}
+
+static int exmap_notifier_invalidate_range_start(struct mmu_notifier *mn, const struct mmu_notifier_range *range) {
+	struct exmap_ctx *ctx = mmu_notifier_to_exmap(mn);
+
+    // Only cleanup the exmap_vma when it is the one being unmapped
+	if (ctx->interfaces && ctx->exmap_vma && ctx->exmap_vma == range->vma) {
+		exmap_vma_cleanup(ctx, range->start, range->end);
+	}
+	return 0;
 }
 
 static const struct mmu_notifier_ops mn_opts = {
 	.release                = exmap_notifier_release,
+	.invalidate_range_start = exmap_notifier_invalidate_range_start,
 };
 
 static int exmap_mmu_notifier(struct exmap_ctx *ctx)
