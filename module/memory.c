@@ -665,27 +665,71 @@ static int
 unmap_pages(struct vm_area_struct *vma, unsigned long addr, unsigned long num_pages,
 						struct free_pages *pages)
 {
+	pgd_t *pgd = NULL;
+	p4d_t *p4d = NULL;
+	pud_t *pud = NULL;
 	pmd_t *pmd = NULL;
 	pte_t *start_pte, *pte;
 	spinlock_t *pte_lock;
 	struct mm_struct *const mm = vma->vm_mm;
 	unsigned long remaining_pages_total = num_pages;
-	unsigned long pages_to_write_in_pmd;
-	int ret, err;
-more:
-	ret = -EFAULT;
-	pmd = walk_to_pmd(mm, addr);
+	unsigned long skip_pages, new_addr, pages_to_write_in_pmd;
 
-	if (!pmd)
-		goto out;
+more:
+	pgd = pgd_offset(mm, addr);
+	if (pgd_none(*pgd)) {
+		new_addr = (addr + PGDIR_SIZE) & P4D_MASK;
+		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
+		if (remaining_pages_total <= skip_pages)
+			goto out;
+
+		addr += PGDIR_SIZE;
+		remaining_pages_total -= skip_pages;
+		/* exmap_debug("pgd: %lx: skipping %lu, left %lu", addr, skip_pages, remaining_pages_total); */
+		goto more;
+	}
+
+	p4d = p4d_offset(pgd, addr);
+	if (p4d_none(*p4d)) {
+		new_addr = (addr + P4D_SIZE) & PUD_MASK;
+		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
+		if (remaining_pages_total <= skip_pages)
+			goto out;
+
+		addr = new_addr;
+		remaining_pages_total -= skip_pages;
+		/* exmap_debug("p4d: %lx: skipping %lu, left %lu", addr, skip_pages, remaining_pages_total); */
+		goto more;
+	}
+
+	pud = pud_offset(p4d, addr);
+	if (pud_none(*pud)) {
+		new_addr = (addr + PUD_SIZE) & PMD_MASK;
+		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
+		if (remaining_pages_total <= skip_pages)
+			goto out;
+
+		addr = new_addr;
+		remaining_pages_total -= skip_pages;
+		/* exmap_debug("pud: %lx: skipping %lu, left %lu", addr, skip_pages, remaining_pages_total); */
+		goto more;
+	}
+
+	pmd = pmd_offset(pud, addr);
+	if (pmd_none(*pmd)) {
+		new_addr = (addr + PMD_SIZE) & PAGE_MASK;
+		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
+		if (remaining_pages_total <= skip_pages)
+			goto out;
+
+		addr = new_addr;
+		remaining_pages_total -= skip_pages;
+		/* exmap_debug("pmd: %lx: skipping %lu, left %lu", addr, skip_pages, remaining_pages_total); */
+		goto more;
+	}
 
 	pages_to_write_in_pmd = min_t(unsigned long,
 								  remaining_pages_total, PTRS_PER_PTE - pte_index(addr));
-
-	/* Allocate the PTE if necessary; takes PMD lock once only. */
-	ret = -ENOMEM;
-	if (exmap_pte_alloc(mm, pmd))
-		goto out;
 
 	while (pages_to_write_in_pmd) {
 		int pte_idx = 0;
@@ -749,9 +793,8 @@ more:
 	}
 	if (remaining_pages_total)
 	   goto more;
-	ret = 0;
 out:
-	return ret;
+	return 0;
 }
 
 
