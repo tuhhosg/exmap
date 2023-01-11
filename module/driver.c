@@ -212,10 +212,12 @@ struct page* exmap_alloc_page_contig(struct exmap_ctx* ctx) {
 	return page;
 }
 
-void exmap_free_stack(struct page* stack, unsigned count) {
+unsigned exmap_free_stack(struct page* stack, unsigned count) {
+	unsigned freed_pages = 0;
+
 	/* interface-local free pages stack can temporarily be NULL until the next page gets pushed */
 	if (!stack)
-		return;
+		return 0;
 
 	void* stack_page_virt = page_to_virt(stack);
 	while (count > 0) {
@@ -224,10 +226,14 @@ void exmap_free_stack(struct page* stack, unsigned count) {
 		BUG_ON(!page);
 		page->mapping = NULL;
 		exmap_free_page_system(page);
+		freed_pages++;
 	}
 	/* pr_info("bundle: free stack page %lx itself", stack); */
 	stack->mapping = NULL;
 	exmap_free_page_system(stack);
+	freed_pages++;
+
+	return freed_pages;
 }
 
 static void vm_close(struct vm_area_struct *vma) {
@@ -254,29 +260,27 @@ static void vm_close(struct vm_area_struct *vma) {
 	// Free all pages in our interfaces
 	for (idx = 0; idx < ctx->max_interfaces; idx++) {
 		struct exmap_interface *interface = &ctx->interfaces[idx];
-		exmap_free_stack(interface->local_pages.stack, interface->local_pages.count);
-		freed_pages += interface->local_pages.count + 1;
+		freed_pages += exmap_free_stack(interface->local_pages.stack, interface->local_pages.count);
 	}
 
 	/* free remaining global list entries */
-	pr_info("vm_close: free global list entries");
+	pr_info("vm_close: free global list entries (%lu from interfaces)\n", freed_pages);
 
 	spin_lock(&ctx->free_list_lock);
 	struct llist_node* node = llist_del_all(&ctx->global_free_list);
 	spin_unlock(&ctx->free_list_lock);
 	while (node) {
 		struct page* stack = container_of((struct address_space**) node, struct page, mapping);
-		exmap_free_stack(stack, 512);
-		freed_pages += 513;
+		node = node->next;
+
+		freed_pages += exmap_free_stack(stack, 512);
 
 		/* When this gets triggered, the global list is corrupted */
-		if (node == node->next) {
+		if (node && node == node->next) {
 			pr_err("vm_close: circular global list node (%lx) == node->next", node);
 			BUG_ON(node == node->next);
 			break;
 		}
-
-		node = node->next;
 	}
 	unlocked_pages = ctx->buffer_size;
 #endif
