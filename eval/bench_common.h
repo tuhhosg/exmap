@@ -153,6 +153,17 @@ static inline long long unsigned time_ns(struct timespec* const ts) {
     + (long long unsigned) ts->tv_nsec;
 }
 
+static inline double time_delta(struct timespec* const ts) {
+	struct timespec N;
+	if (clock_gettime(CLOCK_REALTIME, &N)) {
+		exit(1);
+	}
+	double ret = ((double) N.tv_sec - ts->tv_sec) + (double) (N.tv_nsec - ts->tv_nsec) /1e9;
+	*ts = N;
+	return ret;
+}
+
+
 static unsigned long long
 readTLBShootdownCount(void) {
 	std::ifstream irq_stats("/proc/interrupts");
