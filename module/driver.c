@@ -1103,7 +1103,7 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 	unsigned int action = (kiocb->ki_pos >> 8) & 0xff;
 	struct exmap_interface *interface;
 
-	int rc, rc_all = 0;
+	int rc = 0, rc_all = 0;
 
 	if (action != EXMAP_OP_READ && action != EXMAP_OP_ALLOC) {
 		return -EINVAL;
@@ -1114,21 +1114,25 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 		return -EINVAL;
 	}
 	interface = &ctx->interfaces[iface_id];
+	mutex_lock(&(interface->interface_lock));
 
 	// Allocate Memory in Area
-	rc = exmap_alloc_iter(ctx, interface, iter);
-	if (rc < 0) return rc;
+	rc_all = exmap_alloc_iter(ctx, interface, iter);
+	if (rc_all < 0) goto out;
 
 	// EXMAP_OP_READ == 0
 	if (action != EXMAP_OP_READ) {
-		return rc;
+		goto out;
 	} else {
-		if (!(ctx->file_backend && ctx->file_backend->f_op->read_iter)){
-			pr_info("nofile");
-			return -EINVAL;
+		if (!(ctx->file_backend && ctx->file_backend->f_op && ctx->file_backend->f_op->read_iter)){
+			pr_info("nofile: %p %p", ctx->file_backend, ctx->file_backend->f_op);
+			rc_all = -EINVAL;
+			goto out;
 		}
 	}
 
+	kiocb->ki_filp = ctx->file_backend;
+	
 	while (iov_iter_count(iter)) {
 		struct iovec iovec = iov_iter_iovec(iter);
 		char __user* addr = iovec.iov_base;
@@ -1139,20 +1143,26 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 		// pr_info("exmap: read  @ interface %d: %lu+%lu\n", iface_id, disk_offset, size);
 
 		kiocb->ki_pos = disk_offset;
-		kiocb->ki_filp = ctx->file_backend;
-
 		iov_iter_save_state(iter, &iter_state);
 		iov_iter_truncate(iter, size);
 		rc = call_read_iter(ctx->file_backend, kiocb, iter);
 		iov_iter_restore(iter, &iter_state);
 
-		if (rc < 0) return rc;
+		if (rc < 0) {
+			rc_all = rc;
+			goto out;
+		}
 
 		rc_all += rc;
 
 		iov_iter_advance(iter, iovec.iov_len);
 	}
 
+out:
+	// Restore kiocb
+	kiocb->ki_filp = file;
+	mutex_unlock(&(interface->interface_lock));
+	
 	return rc_all;
 }
 
