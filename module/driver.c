@@ -677,7 +677,7 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	struct exmap_pages_ctx pages_ctx = {
 		.ctx = ctx,
 		.interface = interface,
-		.pages_count = iov_len,
+		.pages_count = 0,
 	};
 
 	for (idx = 0; idx < iov_len; idx++) {
@@ -688,6 +688,7 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 		vec = READ_ONCE(interface->usermem->iov[idx]);
 		uaddr = vma->vm_start + (vec.page << PAGE_SHIFT);
 		alloc_ctx.iov_cur = &vec;
+		pages_ctx.pages_count += vec.len;
 
 		// pr_info("alloc[%d]: off=%llu, len=%d", iface, (uint64_t) vec.page, (int) vec.len);
 
