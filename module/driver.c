@@ -919,6 +919,10 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		if (ctx->interfaces)
 			return -EBUSY;
 
+		// Disable fs notify for the proxy file descriptor as this is
+		// a major bottlneck for accessing files.
+		file->f_mode |= FMODE_NONOTIFY;
+
 		if (setup.fd >= 0) {
 			struct file *file = fget(setup.fd);
 			struct inode *inode;
