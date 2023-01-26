@@ -38,6 +38,10 @@ struct exmap_iov {
 	};
 };
 
+struct exmap_uring_cmd {
+	struct iovec iov;
+};
+
 #define EXMAP_USER_INTERFACE_PAGES 512
 
 STATIC_ASSERT(sizeof(struct exmap_iov) == 8, exmap_iov);

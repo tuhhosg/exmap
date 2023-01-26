@@ -1,3 +1,4 @@
+#include <linux/version.h>
 #include <linux/fs.h>
 #include <linux/blkdev.h>
 #include <linux/bio.h>
@@ -16,6 +17,10 @@
 #include <linux/cdev.h>
 #include <linux/random.h>
 #include <linux/mmu_notifier.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#include <linux/io_uring.h>
+#include <linux/io_uring_types.h>
+#endif
 
 #include <linux/pgtable.h>
 #include <asm/io.h>
@@ -26,7 +31,7 @@
 
 #include <asm/tlbflush.h>
 
-#include <linux/version.h>
+
 
 #include "linux/exmap.h"
 #include "exmap_common.h"
@@ -760,27 +765,26 @@ static inline bool bio_full(struct bio *bio, unsigned len)
 
 
 int
-exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
-	int iface = params->interface;
-	struct exmap_interface *interface  = &(ctx->interfaces[iface]);
+exmap_alloc_from_ivec(struct exmap_ctx *ctx, struct exmap_interface* interface,
+					  struct exmap_iov *ivec, unsigned int ivec_len,
+					  unsigned flags) {
 	struct vm_area_struct  *vma       = ctx->exmap_vma;
-	unsigned int  iov_len             = params->iov_len;
 	unsigned long nr_pages_alloced    = 0;
 	FREE_PAGES(free_pages);
 	int idx, rc = 0, failed = 0;
 	struct exmap_alloc_ctx alloc_ctx = {
 		.ctx = ctx,
 		.interface = interface,
-		.flags = params->flags,
+		.flags = flags,
 	};
 
-	if (iov_len == 0)
+	if (ivec_len == 0)
 		return failed;
 
 	// Pre-fill our pages store with as many pages as there are
 	// IO-Vectors, assuming that each vector uses at least one page
 	rc = exmap_alloc_pages(ctx, interface, &free_pages,
-						   iov_len);
+						   ivec_len);
 	if (rc) {
 		pr_info("First Alloc failed: %d\n", rc);
 		return rc;
@@ -789,14 +793,14 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	// pr_info("First Alloc: %d\n", free_pages.count);
 
 	// Do we really need this lock?
-	mmap_read_lock(vma->vm_mm);
+	//	mmap_read_lock(vma->vm_mm);
 
-	for (idx = 0; idx < iov_len; idx++) {
+	for (idx = 0; idx < ivec_len; idx++) {
 		unsigned long uaddr;
 		struct exmap_iov ret, vec;
 		unsigned free_pages_before;
 
-		vec = READ_ONCE(interface->usermem->iov[idx]);
+		vec = READ_ONCE(ivec[idx]);
 		uaddr = vma->vm_start + (vec.page << PAGE_SHIFT);
 		alloc_ctx.iov_cur = &vec;
 
@@ -826,7 +830,7 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 					(uint64_t) vec.page, (int)vec.len,
 					(int)ret.res, (int) ret.pages);
 
-		WRITE_ONCE(interface->usermem->iov[idx], ret);
+		WRITE_ONCE(ivec[idx], ret);
 	}
 	// free remaining pages into the local interface
 	// pr_info("Free %d (nr_pages_alloced %lu)\n", free_pages.count, nr_pages_alloced);
@@ -838,9 +842,18 @@ exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	// Update the RSS counter once!
 	// add_mm_counter(vma->vm_mm, MM_FILEPAGES, nr_pages_alloced);
 
-	mmap_read_unlock(vma->vm_mm);
+	// mmap_read_unlock(vma->vm_mm);
 
 	return failed;
+}
+
+int
+exmap_alloc(struct exmap_ctx *ctx, struct exmap_action_params *params) {
+	int iface = params->interface;
+	struct exmap_interface *interface  = &(ctx->interfaces[iface]);
+	struct exmap_iov *iov = interface->usermem->iov;
+
+	return exmap_alloc_from_ivec(ctx, interface, iov, params->iov_len, params->flags);
 }
 
 int
@@ -1068,6 +1081,36 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 	return rc;
 }
 
+static bool validate_iovec(struct exmap_ctx *ctx, struct iovec *iovec) {
+	char __user* addr = iovec->iov_base;
+	ssize_t size = iovec->iov_len;
+
+	//if (iovec.iov_len != iov_iter_count(iter)) {
+	//	pr_info("exmap: BUG we currently support only iovectors of length 1\n");
+	//	return -EINVAL;
+	//}
+	// pr_info("iov: %lx + %ld (of %ld)\n", (uintptr_t)addr, size >> PAGE_SHIFT, iov_iter_count(iter));
+
+	if (ctx->exmap_vma->vm_start > (uintptr_t) addr) {
+		pr_info("vmstart");
+		return -EINVAL;
+	}
+	if (ctx->exmap_vma->vm_end < (uintptr_t) addr) {
+		pr_info("vmend");
+		return -EINVAL;
+	}
+	if (((uintptr_t) addr) & ~PAGE_MASK) // Not aligned start
+	{ 
+		pr_info("addr");
+		return -EINVAL;
+	}
+	if (((uintptr_t) size) & ~PAGE_MASK) { // Not aligned end
+		pr_info("size");
+		return -EINVAL;
+	}
+	return 0;
+}
+
 ssize_t exmap_alloc_iter(struct exmap_ctx *ctx, struct exmap_interface *interface, struct iov_iter *iter) {
 	ssize_t total_nr_pages = iov_iter_count(iter) >> PAGE_SHIFT;
 	struct iov_iter_state iter_state;
@@ -1085,38 +1128,19 @@ ssize_t exmap_alloc_iter(struct exmap_ctx *ctx, struct exmap_interface *interfac
 		char __user* addr = iovec.iov_base;
 		ssize_t size = iovec.iov_len;
 
-		//if (iovec.iov_len != iov_iter_count(iter)) {
-		//	pr_info("exmap: BUG we currently support only iovectors of length 1\n");
-		//	return -EINVAL;
-		//}
-		// pr_info("iov: %lx + %ld (of %ld)\n", (uintptr_t)addr, size >> PAGE_SHIFT, iov_iter_count(iter));
-
-		if (ctx->exmap_vma->vm_start > (uintptr_t) addr) {
-			pr_info("vmstart");
-			return -EINVAL;
-		}
-		if (ctx->exmap_vma->vm_end < (uintptr_t) addr) {
-			pr_info("vmend");
-			return -EINVAL;
-		}
-		if (((uintptr_t) addr) & ~PAGE_MASK) // Not aligned start
-		{ 
-			pr_info("addr");
-			return -EINVAL;
-		}
-		if (((uintptr_t) size) & ~PAGE_MASK) { // Not aligned end
-			pr_info("size");
-			return -EINVAL;
-		}
+		rc = validate_iovec(ctx, &iovec);
+		if (rc < 0) { rc_all = rc; goto out; }
 
 		rc = exmap_insert_pages(ctx->exmap_vma, (uintptr_t) addr,
 								(size >> PAGE_SHIFT),
 								&free_pages, NULL,NULL);
-		if (rc < 0) return rc;
+		if (rc < 0) { rc_all = rc;  goto out; }
 		rc_all += rc;
 
 		iov_iter_advance(iter, iovec.iov_len);
 	}
+
+ out:
 
 	if (free_pages.count > 0) { // Free the leftover pages
 		exmap_free_pages(ctx, interface, &free_pages);
@@ -1152,15 +1176,15 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 	rc_all = exmap_alloc_iter(ctx, interface, iter);
 	if (rc_all < 0) goto out;
 
-	// EXMAP_OP_READ == 0
-	if (action != EXMAP_OP_READ) {
-		goto out;
-	} else {
-		if (!(ctx->file_backend && ctx->file_backend->f_op && ctx->file_backend->f_op->read_iter)){
-			pr_info("nofile: %p %p", ctx->file_backend, ctx->file_backend->f_op);
-			rc_all = -EINVAL;
-			goto out;
+	if (action == EXMAP_OP_READ) {
+		if (!ctx->file_backend) {
+			rc_all = -EINVAL; goto out;
 		}
+		if (!ctx->file_backend->f_op->read_iter) {
+			rc_all = -EINVAL; goto out;
+		}
+	} else {
+		goto out;
 	}
 
 	kiocb->ki_filp = ctx->file_backend;
@@ -1197,13 +1221,74 @@ out:
 	
 	return rc_all;
 }
+// We require at least 6.1 as we want uring cmds with fixed buffer
+// support.
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+int exmap_uring_cmd(struct io_uring_cmd *ioucmd, unsigned int issue_flags) {
+	int rc = -EINVAL;
+	struct file *file = ioucmd->file;
+	struct exmap_ctx *ctx = exmap_from_file(file);
+	struct exmap_uring_cmd *cmd = (struct exmap_uring_cmd *)ioucmd->cmd;
+	unsigned int iface_id = ioucmd->cmd_op & 0xff;
+	unsigned int action = (ioucmd->cmd_op >> 8) & 0xff;
+	struct exmap_interface *interface = &(ctx->interfaces[iface_id]);
+	struct exmap_iov *ivec, ivec_stack;
 
-static const struct file_operations fops = {
+	unsigned ivec_len = 0;
+
+	if (iface_id >= ctx->max_interfaces) {
+		pr_info("max: %d", iface_id);
+		return -EINVAL;
+	}
+
+	if (ioucmd->flags & IORING_URING_CMD_FIXED) {
+		struct iov_iter iter;
+		const struct bio_vec *bvec;
+		rc = io_uring_cmd_import_fixed((u64)cmd->iov.iov_base, cmd->iov.iov_len, true, &iter, ioucmd);
+		if (rc < 0) {
+			pr_info("import_fixed failed: iov: %lx-%ld rc=%d", (uintptr_t)cmd->iov.iov_base, cmd->iov.iov_len,
+					rc);
+			return rc;
+		}
+		BUG_ON(!iov_iter_is_bvec(&iter));
+		if (iter.nr_segs > 1) {
+			pr_info("nr_segs: %d", iface_id);
+			return -EINVAL;
+		}
+		bvec = &(iter.bvec[0]);
+		ivec = page_to_virt(bvec->bv_page) + bvec->bv_offset;
+		ivec_len = bvec->bv_len / sizeof(struct exmap_iov);
+	} else {
+		rc = validate_iovec(ctx, &cmd->iov);
+		if (rc < 0) return rc;
+
+		ivec_stack.page = (uintptr_t)(cmd->iov.iov_base - ctx->exmap_vma->vm_start) >> PAGE_SHIFT;
+		ivec_stack.len  = cmd->iov.iov_len >> PAGE_SHIFT;
+		ivec = &ivec_stack;
+		ivec_len = 1;
+	}
+
+	if (action == EXMAP_OP_ALLOC) {
+		mutex_lock(&(interface->interface_lock));
+
+		rc = exmap_alloc_from_ivec(ctx, interface, ivec, ivec_len, 0);
+		
+		mutex_unlock(&(interface->interface_lock));
+	}
+
+	return rc;
+}
+#endif
+
+static const struct file_operations exmap_fops = {
 	.mmap = exmap_mmap,
 	.open = open,
 	.read_iter = exmap_read_iter,
 	.release = release,
-	.unlocked_ioctl = exmap_ioctl
+	.unlocked_ioctl = exmap_ioctl,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	.uring_cmd = exmap_uring_cmd
+#endif
 };
 
 static int dev_uevent_perms(struct device *dev, struct kobj_uevent_env *env) {
@@ -1222,7 +1307,7 @@ static int exmap_init_module(void) {
 	if (device_create(cl, NULL, first, NULL, "exmap") == NULL)
 		goto out_class_destroy;
 
-	cdev_init(&cdev, &fops);
+	cdev_init(&cdev, &exmap_fops);
 	if (cdev_add(&cdev, first, 1) == -1)
 		goto out_device_destroy;
 
