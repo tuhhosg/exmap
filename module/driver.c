@@ -628,6 +628,10 @@ static int open(struct inode *inode, struct file *filp) {
 	// Make the character device O_DIRECT
 	inode->i_mapping->a_ops = &dev_exmap_aops;
 	filp->f_flags |= O_DIRECT | O_NONBLOCK;
+
+	// Disable fs notify for the proxy file descriptor as this is
+	// a major bottlneck for accessing files.
+	filp->f_mode |= FMODE_NONOTIFY;
 	return 0;
 
 free_ctx:
@@ -928,10 +932,6 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		/* pr_info("setup.interfaces = %p", ctx->interfaces); */
 		if (ctx->interfaces)
 			return -EBUSY;
-
-		// Disable fs notify for the proxy file descriptor as this is
-		// a major bottlneck for accessing files.
-		file->f_mode |= FMODE_NONOTIFY;
 
 		if (setup.fd >= 0) {
 			struct file *file = fget(setup.fd);
