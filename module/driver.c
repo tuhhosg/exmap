@@ -41,6 +41,8 @@ static struct class *cl; // Global variable for the device class
 
 struct exmap_interface;
 struct exmap_ctx {
+	struct exmap_ctx *clone_of;
+
 	size_t buffer_size;
 	atomic_t alloc_count;
 
@@ -98,6 +100,14 @@ struct exmap_interface {
 		};
 	};
 };
+
+static inline
+struct exmap_ctx * exmap_from_file(struct file *file) {
+	struct exmap_ctx *ctx = file->private_data;
+	if (ctx->clone_of != NULL)
+		ctx = ctx->clone_of;
+	return ctx;
+}
 
 ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter);
 
@@ -517,7 +527,7 @@ static void exmap_mmu_notifier_unregister(struct exmap_ctx *ctx)
 }
 
 static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
-	struct exmap_ctx *ctx = file->private_data;
+	struct exmap_ctx *ctx = exmap_from_file(file);
 	loff_t offset = vma->vm_pgoff << PAGE_SHIFT;
 	size_t sz = vma->vm_end - vma->vm_start;
 	unsigned long pfn;
@@ -628,6 +638,8 @@ free_ctx:
 
 static int release(struct inode *inode, struct file *filp) {
 	struct exmap_ctx *ctx = filp->private_data;
+	if (ctx->clone_of)
+		goto free_private_data;
 
 	if (ctx->mm_account) {
 		mmdrop(ctx->mm_account);
@@ -649,8 +661,8 @@ static int release(struct inode *inode, struct file *filp) {
 
 	pr_info("release\n");
 
-
-	kfree(ctx);
+ free_private_data:
+	kfree(filp->private_data);
 	filp->private_data = NULL;
 	return 0;
 }
@@ -898,12 +910,10 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct exmap_ioctl_setup  setup;
 	struct exmap_action_params action;
-	struct exmap_ctx *ctx;
+	struct exmap_ctx *ctx = exmap_from_file(file);
 	struct exmap_interface *interface;
 	int rc = 0, idx;
 	gfp_t gfp_flags;
-
-	ctx = (struct exmap_ctx*) file->private_data;
 
 	switch(cmd) {
 	case EXMAP_IOCTL_SETUP:
@@ -1013,7 +1023,25 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size);
 
 		break;
+	case EXMAP_IOCTL_CLONE:
+		struct file *other_file = fget(arg);
+		struct exmap_ctx *other_ctx;
+		if (!other_file) return -EBADFD;
+		
+		if (file->f_op != other_file->f_op) {
+			fput(other_file);
+			return -EINVAL; // Other file is not an exmap
+		}
 
+		other_ctx = other_file->private_data;
+		if (other_ctx->clone_of != NULL) {
+			fput(other_file);
+			return -EINVAL;
+		}
+
+		ctx->clone_of = other_ctx;
+		fput(other_file);
+		return 0;
 	case EXMAP_IOCTL_ACTION:
 		if (unlikely(ctx->interfaces == NULL))
 			return -EBADF;
@@ -1102,7 +1130,7 @@ ssize_t exmap_alloc_iter(struct exmap_ctx *ctx, struct exmap_interface *interfac
 
 ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 	struct file *file = kiocb->ki_filp;
-	struct exmap_ctx *ctx = (struct exmap_ctx *) file->private_data;
+	struct exmap_ctx *ctx = exmap_from_file(file);
 	unsigned int iface_id = kiocb->ki_pos & 0xff;
 	unsigned int action = (kiocb->ki_pos >> 8) & 0xff;
 	struct exmap_interface *interface;
