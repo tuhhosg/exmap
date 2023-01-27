@@ -17,4 +17,6 @@ void *__vmalloc_array(size_t n, size_t size, gfp_t flags);
 					   : PAGE_SHIFT, false)
 
 
+extern uintptr_t* sys_call_table_ptr;
+
 int exmap_acquire_ksyms(void);

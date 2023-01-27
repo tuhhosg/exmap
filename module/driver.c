@@ -1291,11 +1291,68 @@ static const struct file_operations exmap_fops = {
 #endif
 };
 
+
+asmlinkage ssize_t sys_exmap_action(struct pt_regs *regs) {
+	int rc = -EBADFD;
+	int exmap_fd = regs->di;
+	int opcode   = regs->si;
+	int iface_id = regs->dx;
+	int len      = regs->r10;
+	struct file *file;
+	struct exmap_ctx *ctx;
+	struct exmap_action_params action;
+
+	file = fget(exmap_fd);
+	if (unlikely(!file))
+		goto out_return;
+
+	if (unlikely(file->f_op != &exmap_fops))
+		goto out_fput;
+
+	rc = -EINVAL;
+	ctx = exmap_from_file(file);
+	if (unlikely(!ctx || ctx->interfaces == NULL))
+		goto out_fput;
+
+	if (unlikely(iface_id >= ctx->max_interfaces))
+		goto out_fput;
+
+	if (unlikely(opcode > ARRAY_SIZE(exmap_action_array)
+				 || !exmap_action_array[opcode]))
+		goto out_fput;
+
+	mutex_lock(&(ctx->interfaces[iface_id].interface_lock));
+	action.interface = iface_id;
+	action.iov_len   = len;
+	action.opcode    = opcode;
+	rc = exmap_action_array[opcode](ctx, &action);
+	mutex_unlock(&(ctx->interfaces[iface_id].interface_lock));
+
+ out_fput:
+	fput(file);
+	
+ out_return:
+	return rc;
+}
+
+
 static int dev_uevent_perms(struct device *dev, struct kobj_uevent_env *env) {
 	return add_uevent_var(env, "DEVMODE=%#o", 0666);
 }
 
+static uintptr_t orig_syscall_400;
+
+
+/* bit 16 (for the CR0 register) */
+#define WP_MASK 0x10000
+static inline void custom_write_cr0(unsigned long val)
+{
+    asm volatile("mov %0,%%cr0": "+r" (val) : : "memory");
+}
+
 static int exmap_init_module(void) {
+	unsigned long cr0;
+	
 	if (exmap_acquire_ksyms())
 		goto out;
 
@@ -1310,6 +1367,18 @@ static int exmap_init_module(void) {
 	cdev_init(&cdev, &exmap_fops);
 	if (cdev_add(&cdev, first, 1) == -1)
 		goto out_device_destroy;
+
+	pr_info("syscall table: %lx\n", sys_call_table_ptr);
+
+	/* disable write protection */
+    cr0 = read_cr0();
+    custom_write_cr0(cr0 & ~WP_MASK);
+
+	orig_syscall_400 = sys_call_table_ptr[SYS_EXMAP_ACTION];
+	sys_call_table_ptr[SYS_EXMAP_ACTION] = (uintptr_t) &sys_exmap_action;
+
+	/* re-enable write protection */
+    custom_write_cr0(cr0);
 
 	printk(KERN_INFO "exmap registered");
 
@@ -1326,10 +1395,24 @@ static int exmap_init_module(void) {
 }
 
 static void exmap_cleanup_module(void) {
+	unsigned long cr0;
+	
 	cdev_del(&cdev);
 	device_destroy(cl, first);
 	class_destroy(cl);
 	unregister_chrdev_region(first, 1);
+
+	/* disable write protection */
+    cr0 = read_cr0();
+    custom_write_cr0(cr0 & ~WP_MASK);
+	
+	// Restore syscall
+	if (orig_syscall_400 && sys_call_table_ptr)
+		sys_call_table_ptr[SYS_EXMAP_ACTION] = orig_syscall_400;
+
+	/* re-enable write protection */
+    custom_write_cr0(cr0);
+	
 	printk(KERN_INFO "exmap unregistered");
 }
 

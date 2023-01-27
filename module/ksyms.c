@@ -22,6 +22,8 @@ static ssize_t (*vfs_read_ksym)(struct file *file, char __user *buf,
 
 static void (*iov_iter_restore_ksym)(struct iov_iter *i, struct iov_iter_state *state);
 
+uintptr_t* sys_call_table_ptr;
+
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 
@@ -53,6 +55,9 @@ int exmap_acquire_ksyms(void)
 	if(!iov_iter_restore_ksym)
 		return -1;
 
+	sys_call_table_ptr = (void *)kallsyms_lookup_name("sys_call_table");
+	if(!sys_call_table_ptr)
+		return -1;
 
 	return 0;
 }
