@@ -64,7 +64,8 @@ enum exmap_opcode {
 enum exmap_flags {
 	// When allocating memory, we only look at the first element, and
 	// if that is currently mapped, we skip that exmap_iov
-	EXMAP_ALLOC_PROBE  = 1, // Not implemented yet(!); If the first page of a vector is mapped, return immediately
+	EXMAP_ALLOC_PROBE  = 1,    // Not implemented yet(!); If the first page of a vector is mapped, return immediately
+	EXMAP_PAGEFAULT_ALLOC = 2, // Handle pagefaults by mapping 4K of memory
 };
 typedef enum exmap_flags exmap_flags;
 

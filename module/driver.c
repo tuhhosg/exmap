@@ -45,6 +45,7 @@ static struct cdev cdev;
 static struct class *cl; // Global variable for the device class
 
 #define EXMAP_FLAGS_ACTIVE (1 << 0) // Is the exmap still active or in a state of decay/tear down.
+#define EXMAP_FLAGS_PAGEFAULT_ALLOC (1 << 1) // Alloc new memory on a page fault
 
 struct exmap_interface;
 struct exmap_ctx {
@@ -433,31 +434,41 @@ static void vm_close(struct vm_area_struct *vma) {
 }
 
 /* First page access. */
-static vm_fault_t vm_fault(struct vm_fault *vmf) {
-#ifndef HANDLE_PAGE_FAULT // The default
-	pr_info("vm_fault: off=%ld\n", vmf->pgoff);
-	// We forbid the implicit page fault interface
-	return VM_FAULT_SIGSEGV;
-#else
-	int rc;
+static vm_fault_t exmap_vm_fault(struct vm_fault *vmf) {
+	int rc, cpu, ret;
 	FREE_PAGES(free_pages);
 	struct vm_area_struct *vma = vmf->vma;
 	struct exmap_ctx *ctx = vma->vm_private_data;
-	struct exmap_interface *interface = &ctx->interfaces[0];
+	struct exmap_interface *interface;
+	if (atomic_read(&ctx->flags) & EXMAP_FLAGS_PAGEFAULT_ALLOC) {
+		cpu = raw_smp_processor_id() % ctx->max_interfaces;
+		ret = VM_FAULT_SIGSEGV;
+
+		interface = &ctx->interfaces[cpu];
+		mutex_lock(&interface->interface_lock);
+
+		rc = exmap_alloc_pages(ctx, interface, &free_pages,
+							   1);
+		if (rc < 0) goto out;
+
+		rc = exmap_insert_pages(vma, (uintptr_t) vmf->address,
+								1, &free_pages, NULL,NULL);
+		if (rc < 0) goto out;
 
 
-	rc = exmap_alloc_pages(ctx, interface, &free_pages,
-						   1);
-	if (rc < 0) return VM_FAULT_SIGSEGV;
+		exmap_free_pages(ctx, interface, &free_pages);
 
-	rc = exmap_insert_pages(vma, (uintptr_t) vmf->address,
-							1, &free_pages, NULL,NULL);
-	if (rc < 0) return VM_FAULT_SIGSEGV;
+		ret = VM_FAULT_NOPAGE;
+	out:
+		mutex_unlock(&interface->interface_lock);
 
-	exmap_free_pages(ctx, interface, &free_pages);
+		return ret;
+	} else {
+		pr_info("vm_fault: off=%ld addr=%lx\n", vmf->pgoff, vmf->address);
 
-	return VM_FAULT_NOPAGE;
-#endif
+		// We forbid the implicit page fault interface
+		return VM_FAULT_SIGSEGV;
+	}
 }
 
 /* After mmap. TODO vs mmap, when can this happen at a different time than mmap? */
@@ -470,7 +481,7 @@ static struct vm_operations_struct vm_ops =
 {
 	.close = vm_close,
 	.open = vm_open,
-	.fault = vm_fault,
+	.fault = exmap_vm_fault,
 };
 
 static inline struct exmap_ctx *mmu_notifier_to_exmap(struct mmu_notifier *mn)
@@ -951,7 +962,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 	struct exmap_action_params action;
 	struct exmap_ctx *ctx = exmap_from_file(file);
 	struct exmap_interface *interface;
-	int rc = 0, idx;
+	int rc = 0, idx, exmap_flags;
 	gfp_t gfp_flags;
 
 	switch(cmd) {
@@ -1057,7 +1068,10 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		// 2. Allocate Memory from the system
 		add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size);
 
-		atomic_set(&ctx->flags, EXMAP_FLAGS_ACTIVE);
+		exmap_flags = EXMAP_FLAGS_ACTIVE;
+		if (setup.flags & EXMAP_PAGEFAULT_ALLOC)
+			exmap_flags |= EXMAP_FLAGS_PAGEFAULT_ALLOC;
+		atomic_set(&ctx->flags, exmap_flags);
 
 		break;
 	case EXMAP_IOCTL_CLONE:
