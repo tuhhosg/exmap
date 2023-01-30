@@ -44,6 +44,8 @@ static dev_t first;
 static struct cdev cdev;
 static struct class *cl; // Global variable for the device class
 
+#define EXMAP_FLAGS_ACTIVE (1 << 0) // Is the exmap still active or in a state of decay/tear down.
+
 struct exmap_interface;
 struct exmap_ctx {
 	struct exmap_ctx *clone_of;
@@ -64,6 +66,7 @@ struct exmap_ctx {
 
 	/* Interfaces are memory mapped aread where the kernel can communicate to the user
 	 */
+	atomic_t    flags;
 	int    max_interfaces;
 	struct exmap_interface *interfaces;
 
@@ -480,8 +483,21 @@ static void exmap_vma_cleanup(struct exmap_ctx *ctx, unsigned long start, unsign
 
 	struct vm_area_struct *vma = ctx->exmap_vma;
 	unsigned long pages = (end - start) >> PAGE_SHIFT;
-
     FREE_PAGES(free_pages);
+
+	// Clear all flags and make the exmap inactive such that no new
+	// operations are started from now on.
+	int flags = atomic_xchg(&ctx->flags, 0);
+	if (!(flags & EXMAP_FLAGS_ACTIVE)) {
+		printk("cleanup already happened. skip it.\n");
+		return;
+	}
+
+	// Sequentialize after all actions. We never unlock these
+	// interfaces!
+	for (unsigned idx = 0; idx < ctx->max_interfaces; idx++) {
+		mutex_lock(&ctx->interfaces[idx].interface_lock);
+	}
 
     rc = exmap_unmap_pages(vma, vma->vm_start, pages, &free_pages);
     BUG_ON(rc != 0);
@@ -492,6 +508,10 @@ static void exmap_vma_cleanup(struct exmap_ctx *ctx, unsigned long start, unsign
     exmap_free_pages(ctx, &ctx->interfaces[0], &free_pages);
 
     printk("notifier cleanup: purged %lu pages\n", unmapped_pages);
+
+	for (unsigned idx = 0; idx < ctx->max_interfaces; idx++) {
+		mutex_unlock(&ctx->interfaces[idx].interface_lock);
+	}
 }
 
 static void exmap_notifier_release(struct mmu_notifier *mn,
@@ -526,8 +546,9 @@ static int exmap_mmu_notifier(struct exmap_ctx *ctx)
 
 static void exmap_mmu_notifier_unregister(struct exmap_ctx *ctx)
 {
-	if (current->mm) {
+	if (current->mm && ctx->mmu_notifier.ops) {
 		mmu_notifier_unregister(&ctx->mmu_notifier, current->mm);
+		ctx->mmu_notifier.ops = NULL;
 	}
 }
 
@@ -543,12 +564,12 @@ static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
 			return -EBUSY;
 		}
 
-		ctx->exmap_vma = vma;
 		vma->vm_ops   = &vm_ops;
 		vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP | VM_NOHUGEPAGE | VM_DONTCOPY;
 		vma->vm_flags |= VM_MIXEDMAP; // required for vm_insert_page
 		vma->vm_private_data = ctx;
 		vm_open(vma);
+		ctx->exmap_vma = vma;
 	} else if (offset >= EXMAP_OFF_INTERFACE_BASE && offset <= EXMAP_OFF_INTERFACE_MAX) {
 		int idx = (offset - EXMAP_OFF_INTERFACE_BASE) >> PAGE_SHIFT;
 		struct exmap_interface *interface;
@@ -816,6 +837,7 @@ exmap_alloc_from_ivec(struct exmap_ctx *ctx, struct exmap_interface* interface,
 				break;
 			}
 		}
+		BUG_ON(free_pages.count < vec.len);
 
 		free_pages_before = free_pages.count;
 		rc = exmap_insert_pages(vma, uaddr, vec.len, &free_pages,
@@ -1035,6 +1057,8 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		// 2. Allocate Memory from the system
 		add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size);
 
+		atomic_set(&ctx->flags, EXMAP_FLAGS_ACTIVE);
+
 		break;
 	case EXMAP_IOCTL_CLONE:
 		struct file *other_file = fget(arg);
@@ -1059,6 +1083,9 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		if (unlikely(ctx->interfaces == NULL))
 			return -EBADF;
 
+		if (unlikely(!(atomic_read(&ctx->flags) & EXMAP_FLAGS_ACTIVE)))
+			return -EPROTO;
+
 		if( copy_from_user(&action, (struct exmap_action_params *) arg,
 						   sizeof(struct exmap_action_params)) )
 			return -EFAULT;
@@ -1071,7 +1098,10 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			return -EINVAL;
 
 		mutex_lock(&(ctx->interfaces[action.interface].interface_lock));
-		rc = exmap_action_array[action.opcode](ctx, &action);
+		if (atomic_read(&ctx->flags) & EXMAP_FLAGS_ACTIVE)
+			rc = exmap_action_array[action.opcode](ctx, &action);
+		else
+			rc = -EPROTO;
 		mutex_unlock(&(ctx->interfaces[action.interface].interface_lock));
 		break;
 	default:
@@ -1171,6 +1201,10 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 	}
 	interface = &ctx->interfaces[iface_id];
 	mutex_lock(&(interface->interface_lock));
+	if (!(atomic_read(&ctx->flags) & EXMAP_FLAGS_ACTIVE)) {
+		rc_all = -EPROTO;
+		goto out;
+	}
 
 	// Allocate Memory in Area
 	rc_all = exmap_alloc_iter(ctx, interface, iter);
@@ -1270,9 +1304,10 @@ int exmap_uring_cmd(struct io_uring_cmd *ioucmd, unsigned int issue_flags) {
 
 	if (action == EXMAP_OP_ALLOC) {
 		mutex_lock(&(interface->interface_lock));
-
-		rc = exmap_alloc_from_ivec(ctx, interface, ivec, ivec_len, 0);
-		
+		if (atomic_read(&ctx->flags) & EXMAP_FLAGS_ACTIVE)
+			rc = exmap_alloc_from_ivec(ctx, interface, ivec, ivec_len, 0);
+		else
+			rc = -EPROTO;
 		mutex_unlock(&(interface->interface_lock));
 	}
 
@@ -1325,7 +1360,10 @@ asmlinkage ssize_t sys_exmap_action(struct pt_regs *regs) {
 	action.interface = iface_id;
 	action.iov_len   = len;
 	action.opcode    = opcode;
-	rc = exmap_action_array[opcode](ctx, &action);
+	if (atomic_read(&ctx->flags) & EXMAP_FLAGS_ACTIVE)
+		rc = exmap_action_array[opcode](ctx, &action);
+	else
+		rc = -EPROTO;
 	mutex_unlock(&(ctx->interfaces[iface_id].interface_lock));
 
  out_fput:

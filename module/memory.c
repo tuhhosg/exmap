@@ -441,7 +441,7 @@ int exmap_insert_pages(struct vm_area_struct *vma, unsigned long addr,
 					   unsigned long num_pages, struct free_pages *pages,
 					   exmap_insert_callback cb, struct exmap_alloc_ctx *data)
 {
-	const unsigned long end_addr = addr + (pages->count * PAGE_SIZE) - 1;
+	const unsigned long end_addr = addr + (num_pages * PAGE_SIZE) - 1;
 
 	if (addr < vma->vm_start || end_addr >= vma->vm_end)
 		return -EFAULT;
