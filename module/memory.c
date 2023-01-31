@@ -376,14 +376,15 @@ more:
 		if (pages_to_write_in_pmd == 1) {
 			struct page *page = list_first_entry_or_null(&free_pages->list, struct page, lru);
 			BUG_ON(!page);
+			list_del(&page->lru);
 
 			pte = pte_offset_map(pmd, addr);
 			err = insert_page_fastpath(pte, addr, page, prot);
 
-			if (!err) {
-				// We actually used the page
+			if (unlikely(err)) { // Insert failed, somebody else was faster
+				list_add(&page->lru, &free_pages->list);
+			} else { // We actually used the page
 				BUG_ON(free_pages->count == 0);
-				list_del(&page->lru);
 				free_pages->count --;
 			}
 
