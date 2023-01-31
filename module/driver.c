@@ -435,40 +435,44 @@ static void vm_close(struct vm_area_struct *vma) {
 
 /* First page access. */
 static vm_fault_t exmap_vm_fault(struct vm_fault *vmf) {
-	int rc, cpu, ret;
+	int rc, cpu, ret = VM_FAULT_SIGSEGV;
 	FREE_PAGES(free_pages);
 	struct vm_area_struct *vma = vmf->vma;
 	struct exmap_ctx *ctx = vma->vm_private_data;
 	struct exmap_interface *interface;
 	if (atomic_read(&ctx->flags) & EXMAP_FLAGS_PAGEFAULT_ALLOC) {
 		cpu = raw_smp_processor_id() % ctx->max_interfaces;
-		ret = VM_FAULT_SIGSEGV;
+		// pr_info("fault: %d\n", cpu);
 
 		interface = &ctx->interfaces[cpu];
-		mutex_lock(&interface->interface_lock);
+		// mutex_lock(&interface->interface_lock);
 
 		rc = exmap_alloc_pages(ctx, interface, &free_pages,
 							   1);
-		if (rc < 0) goto out;
+		if (rc < 0) {
+			pr_info("alloc failed: %d\n", rc);
+			goto out;
+		}
 
 		rc = exmap_insert_pages(vma, (uintptr_t) vmf->address,
 								1, &free_pages, NULL,NULL);
-		if (rc < 0) goto out;
-
+		if (rc < 0) {	
+			pr_info("insert failed: %d\n", rc);
+			goto out;
+		}
 
 		exmap_free_pages(ctx, interface, &free_pages);
 
+		// pr_info("fault ok: %d\n", cpu);
+
 		ret = VM_FAULT_NOPAGE;
 	out:
-		mutex_unlock(&interface->interface_lock);
-
-		return ret;
+		// mutex_unlock(&interface->interface_lock);
 	} else {
-		pr_info("vm_fault: off=%ld addr=%lx\n", vmf->pgoff, vmf->address);
-
 		// We forbid the implicit page fault interface
-		return VM_FAULT_SIGSEGV;
+		pr_info("vm_fault: off=%ld addr=%lx\n", vmf->pgoff, vmf->address);
 	}
+	return ret;
 }
 
 /* After mmap. TODO vs mmap, when can this happen at a different time than mmap? */
@@ -1419,8 +1423,6 @@ static int exmap_init_module(void) {
 	cdev_init(&cdev, &exmap_fops);
 	if (cdev_add(&cdev, first, 1) == -1)
 		goto out_device_destroy;
-
-	pr_info("syscall table: %lx\n", sys_call_table_ptr);
 
 	/* disable write protection */
     cr0 = read_cr0();
