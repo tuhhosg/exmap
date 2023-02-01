@@ -1171,7 +1171,7 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 	int rc = 0, rc_all = 0;
 
 	if (action != EXMAP_OP_READ && action != EXMAP_OP_ALLOC) {
-		pr_info("invalid action: id:%d action:%d (%lx)", iface_id, action, kiocb->ki_pos);
+		pr_info("invalid action: id:%d action:%d (%llx)", iface_id, action, kiocb->ki_pos);
 		return -EINVAL;
 	}
 
@@ -1195,8 +1195,6 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 			pr_info("read iter??");
 			rc_all = -EINVAL; goto out;
 		}
-	} else {
-		goto out;
 	}
 
 	// Iterate over IO Vector. Allocate and then read
@@ -1206,7 +1204,8 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 	rc_all = exmap_alloc_pages(ctx, interface, &free_pages,
 						   total_nr_pages);
 	if (rc_all != 0) {
-		pr_info("exmap[%d] alloc_pages failed: %d\n", interface - ctx->interfaces, total_nr_pages);
+		pr_info("exmap[%d] alloc_pages failed: %ld\n", (u16)(interface - ctx->interfaces),
+				total_nr_pages);
 		goto out;
 	}
 	
@@ -1239,7 +1238,8 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 		}
 
 		if ((pages_before - pages_after) != pages_should) {
-			// pr_info("warning: alloc did not insert new pages ");
+			//pr_info("error: did not insert new pages at %d\n",
+			//	disk_offset >> PAGE_SHIFT);
 			break;
 		}
 
@@ -1252,14 +1252,14 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 				rc_all = rc;
 				break;
 			} else if (rc < 0) {
-				pr_info("exmap: read failed with: %d (%ld)\n", rc,
-						disk_offset >> PAGE_SIZE);
-				rc = exmap_unmap_pages(ctx->exmap_vma, addr, size, &free_pages);
+				pr_info("exmap: read failed with: %d (%lld)\n", rc,
+						disk_offset >> PAGE_SHIFT);
+				rc = exmap_unmap_pages(ctx->exmap_vma, (uintptr_t) addr, size, &free_pages);
 				if (rc < 0) rc_all = rc;
 				break;
 			}
 		} else { // Only allocate memory
-			rc_all += size;
+			rc = size;
 		}
 
 		// rc is the (positive) number of bytes;
@@ -1334,6 +1334,14 @@ int exmap_uring_cmd(struct io_uring_cmd *ioucmd, unsigned int issue_flags) {
 			rc = -EPROTO;
 		mutex_unlock(&(interface->interface_lock));
 	}
+
+	if (ivec == &ivec_stack) {
+		if (ivec_stack.res < 0)
+			rc = ivec_stack.res;
+		else
+			rc = ivec_stack.pages * PAGE_SIZE;
+	}
+
 
 	return rc;
 }
