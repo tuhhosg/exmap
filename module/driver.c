@@ -1159,62 +1159,24 @@ static bool validate_iovec(struct exmap_ctx *ctx, struct iovec *iovec) {
 	return 0;
 }
 
-ssize_t exmap_alloc_iter(struct exmap_ctx *ctx, struct exmap_interface *interface, struct iov_iter *iter) {
-	ssize_t total_nr_pages = iov_iter_count(iter) >> PAGE_SHIFT;
-	struct iov_iter_state iter_state;
-	FREE_PAGES(free_pages);
-	int rc, rc_all = 0;
-
-	// Allocate Memory for all Vector Entries
-	rc = exmap_alloc_pages(ctx, interface, &free_pages,
-						   total_nr_pages);
-	if (rc < 0) return rc;
-
-	iov_iter_save_state(iter, &iter_state);
-	while (iov_iter_count(iter)) {
-		struct iovec iovec = iov_iter_iovec(iter);
-		char __user* addr = iovec.iov_base;
-		ssize_t size = iovec.iov_len;
-
-		rc = validate_iovec(ctx, &iovec);
-		if (rc < 0) { rc_all = rc; goto out; }
-
-		rc = exmap_insert_pages(ctx->exmap_vma, (uintptr_t) addr,
-								(size >> PAGE_SHIFT),
-								&free_pages, NULL,NULL);
-		if (rc < 0) { rc_all = rc;  goto out; }
-		rc_all += rc;
-
-		iov_iter_advance(iter, iovec.iov_len);
-	}
-
- out:
-
-	if (free_pages.count > 0) { // Free the leftover pages
-		exmap_free_pages(ctx, interface, &free_pages);
-	}
-
-	iov_iter_restore(iter, &iter_state);
-
-	return rc_all;
-}
-
-
 ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 	struct file *file = kiocb->ki_filp;
 	struct exmap_ctx *ctx = exmap_from_file(file);
 	unsigned int iface_id = kiocb->ki_pos & 0xff;
-	unsigned int action = (kiocb->ki_pos >> 8) & 0xff;
+	unsigned int action   = (kiocb->ki_pos >> 8) & 0xff;
 	struct exmap_interface *interface;
+	ssize_t total_nr_pages;
+	FREE_PAGES(free_pages);
 
 	int rc = 0, rc_all = 0;
 
 	if (action != EXMAP_OP_READ && action != EXMAP_OP_ALLOC) {
+		pr_info("invalid action: id:%d action:%d (%lx)", iface_id, action, kiocb->ki_pos);
 		return -EINVAL;
 	}
 
 	if (iface_id >= ctx->max_interfaces) {
-		pr_info("max");
+		pr_info("max interfaces");
 		return -EINVAL;
 	}
 	interface = &ctx->interfaces[iface_id];
@@ -1224,53 +1186,97 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 		goto out;
 	}
 
-	// Allocate Memory in Area
-	rc_all = exmap_alloc_iter(ctx, interface, iter);
-	if (rc_all < 0) goto out;
-
 	if (action == EXMAP_OP_READ) {
 		if (!ctx->file_backend) {
+			pr_info("file backend??");
 			rc_all = -EINVAL; goto out;
 		}
 		if (!ctx->file_backend->f_op->read_iter) {
+			pr_info("read iter??");
 			rc_all = -EINVAL; goto out;
 		}
 	} else {
 		goto out;
 	}
 
+	// Iterate over IO Vector. Allocate and then read
 	kiocb->ki_filp = ctx->file_backend;
+
+	total_nr_pages = iov_iter_count(iter) >> PAGE_SHIFT;
+	rc_all = exmap_alloc_pages(ctx, interface, &free_pages,
+						   total_nr_pages);
+	if (rc_all != 0) {
+		pr_info("exmap[%d] alloc_pages failed: %d\n", interface - ctx->interfaces, total_nr_pages);
+		goto out;
+	}
 	
 	while (iov_iter_count(iter)) {
 		struct iovec iovec = iov_iter_iovec(iter);
 		char __user* addr = iovec.iov_base;
 		ssize_t size = iovec.iov_len;
 		loff_t  disk_offset = (uintptr_t)addr - ctx->exmap_vma->vm_start;
+		unsigned pages_before, pages_after;
+		unsigned pages_should = size >> PAGE_SHIFT;
 		struct iov_iter_state iter_state;
 
-		// pr_info("exmap: read  @ interface %d: %lu+%lu\n", iface_id, disk_offset, size);
+		//pr_info("exmap: read  @ interface %d: %lu+%lu pages\n", interface - ctx->interfaces,
+		//		disk_offset, pages_should);
+		
+		// Validate that the IO Vector is in our exmap range
+		rc = validate_iovec(ctx, &iovec);
+		if (rc < 0) { rc_all = rc; goto out; }
 
-		kiocb->ki_pos = disk_offset;
-		iov_iter_save_state(iter, &iter_state);
-		iov_iter_truncate(iter, size);
-		rc = call_read_iter(ctx->file_backend, kiocb, iter);
-		iov_iter_restore(iter, &iter_state);
-
+		BUG_ON(free_pages.count < pages_should);
+		
+		// Insert memory in that range
+		pages_before = free_pages.count;
+		rc = exmap_insert_pages(ctx->exmap_vma, (uintptr_t) addr,
+								pages_should, &free_pages, NULL,NULL);
+		pages_after = free_pages.count;
 		if (rc < 0) {
-			rc_all = rc;
-			goto out;
+			pr_info("exmap: insert failed with: %d\n", rc);
+			break;
 		}
 
+		if ((pages_before - pages_after) != pages_should) {
+			// pr_info("warning: alloc did not insert new pages ");
+			break;
+		}
+
+		if (action == EXMAP_OP_READ) {
+			kiocb->ki_pos = disk_offset;
+			iov_iter_save_state(iter, &iter_state);
+			iov_iter_truncate(iter, size);
+			rc = call_read_iter(ctx->file_backend, kiocb, iter);
+			if (rc == -EIOCBQUEUED) {
+				rc_all = rc;
+				break;
+			} else if (rc < 0) {
+				pr_info("exmap: read failed with: %d (%ld)\n", rc,
+						disk_offset >> PAGE_SIZE);
+				rc = exmap_unmap_pages(ctx->exmap_vma, addr, size, &free_pages);
+				if (rc < 0) rc_all = rc;
+				break;
+			}
+		} else { // Only allocate memory
+			rc_all += size;
+		}
+
+		// rc is the (positive) number of bytes;
 		rc_all += rc;
 
 		iov_iter_advance(iter, iovec.iov_len);
 	}
 
 out:
-	// Restore kiocb
-	kiocb->ki_filp = file;
+	if (free_pages.count > 0) { // Free the leftover pages
+		exmap_free_pages(ctx, interface, &free_pages);
+	}
+
+	// Restore kiocb (FIXME: This was necessary at some point, but it provokes weirdest bugs)
+	// kiocb->ki_filp = file;
 	mutex_unlock(&(interface->interface_lock));
-	
+
 	return rc_all;
 }
 // We require at least 6.1 as we want uring cmds with fixed buffer
