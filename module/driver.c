@@ -8,6 +8,8 @@
 #include <linux/module.h>
 #include <linux/file.h>
 #include <linux/proc_fs.h>
+#include <linux/hugetlb.h>
+#include <asm/pgtable.h>
 #include <linux/uaccess.h> /* copy_from_user, copy_to_user */
 #include <linux/slab.h>
 #include <linux/mm.h>
@@ -60,6 +62,9 @@ struct exmap_ctx {
 
 	/* Here is the main buffer located */
 	struct vm_area_struct *exmap_vma;
+
+	/* Here is the ptexport buffer located */
+	struct vm_area_struct *ptexport_vma;
 
 	/* The baking storage */
 	struct file *file_backend;
@@ -404,6 +409,99 @@ void exmap_free_pages(struct exmap_ctx *ctx,
 	return;
 }
 
+////////////////////////////////////////////////////////////////
+// Page Table Export
+
+/* First page access. */
+static vm_fault_t pt_export_vm_fault(struct vm_fault *vmf) {
+	int ret = VM_FAULT_SIGSEGV;
+	struct vm_area_struct *vma = vmf->vma;
+	struct exmap_ctx *ctx = vma->vm_private_data;
+	unsigned long pfn = (vmf->real_address - vma->vm_start) / sizeof(pteval_t);
+	unsigned long exmap_addr    = ctx->exmap_vma->vm_start + pfn * PAGE_SIZE;
+
+
+	// Ask for the page table
+	pmd_t *pmd = exmap_walk_to_pmd(ctx->exmap_vma, exmap_addr);
+	if (pmd && pmd_present(*pmd) && !pmd_huge(*pmd)) {
+		int rc;
+		pte_t *pte = pte_offset_map(pmd, exmap_addr);
+		struct page* ptable = virt_to_page(pte);
+		FREE_PAGES(free_pages);
+
+		//pr_info("ptexport/vm_fault: addr=%lx, pn: %d, ptable: %lx\n", vmf->address, pfn, ptable);
+		//pr_info("ptexport/vm_fault: pte: %lx, %lx\n", pte, page_to_virt(ptable));
+		//pr_info("ptexport/vm_fault: pteval: %lx\n", pte_val(*pte));
+
+		//pmd_t *ptexport_pmd = exmap_walk_to_pmd(ctx->ptexport_vma, vmf->address);
+		//pte_t *ptexport_pte = pte_offset_map(ptexport_pmd, vmf->address);
+
+		// This is an uggly hack to insert the page without validation
+		list_add(&ptable->lru, &free_pages.list);
+		free_pages.count++;
+		rc = exmap_insert_pages(vma, vmf->address, 1, &free_pages, NULL,NULL);
+		BUG_ON(rc != 0);
+		
+		//pr_info("ptexport/vm_fault: ptexport: %lx\n", pte_val(*ptexport_pte));
+		ret = VM_FAULT_NOPAGE;
+	}
+	return ret;
+}
+
+static struct vm_operations_struct pt_export_vm_ops = {
+	.fault = pt_export_vm_fault,
+};
+
+static void ptexport_vma_cleanup(struct exmap_ctx *ctx) {
+	unsigned long rc, unmapped_pages;
+	struct vm_area_struct *vma = ctx->ptexport_vma;
+	unsigned pages = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
+	pr_info("ptexport_vma_cleanup!");
+	rc = exmap_unmap_pages(vma, vma->vm_start, pages, NULL);
+	BUG_ON(rc != 0);
+}
+
+
+static int pt_export_mmap(struct exmap_ctx *ctx, struct vm_area_struct *vma) {
+	unsigned long ex_start_pfn, ex_end_pfn, pt_export_max;
+
+	// ExMap Mapping must be created beforehand
+	if (!ctx->exmap_vma)
+		return -EPROTO;
+
+	ex_start_pfn = ctx->exmap_vma->vm_start >> PAGE_SHIFT;
+	ex_end_pfn   = ctx->exmap_vma->vm_end   >> PAGE_SHIFT;
+
+	// Are all exported page table only filled with PTEs from our
+	// exmap_vma? Otherwise: Information leakage
+	if ((ex_start_pfn & (PTRS_PER_PTE - 1)) != 0)
+		return -EFAULT;
+
+	if ((ex_end_pfn & (PTRS_PER_PTE - 1)) != 0)
+		return -EFAULT;
+
+
+	// Next, check that Our VMA is not larger than the exmap
+	pt_export_max = (ex_end_pfn - ex_start_pfn) * sizeof(pteval_t);
+	if ((vma->vm_end - vma->vm_start) > pt_export_max)
+		return -EOVERFLOW;
+	
+	pr_info("pt_export: exmap(%lx + %lx pages), will export %ld page tables\n",
+			ctx->exmap_vma->vm_start, ex_end_pfn - ex_start_pfn,
+			(vma->vm_end - vma->vm_start) >> PAGE_SHIFT);
+
+	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP | VM_NOHUGEPAGE | VM_DONTCOPY;
+	vma->vm_flags |= VM_MIXEDMAP;
+	vma->vm_private_data = ctx;
+	vma->vm_ops = &pt_export_vm_ops;
+	vma->vm_private_data = ctx;
+	ctx->ptexport_vma = vma;
+
+	return 0;
+}
+
+////////////////////////////////////////////////////////////////
+// Exmap mmap()
 static void vm_close(struct vm_area_struct *vma) {
 	struct exmap_ctx *ctx = vma->vm_private_data;
 	unsigned long freed_pages = 0;
@@ -536,6 +634,9 @@ static void exmap_notifier_release(struct mmu_notifier *mn,
 	if (ctx->interfaces && ctx->exmap_vma) {
 		exmap_vma_cleanup(ctx, ctx->exmap_vma->vm_start, ctx->exmap_vma->vm_end);
 	}
+	if (ctx->ptexport_vma) {
+		ptexport_vma_cleanup(ctx);
+	}
 }
 
 static int exmap_notifier_invalidate_range_start(struct mmu_notifier *mn, const struct mmu_notifier_range *range) {
@@ -544,6 +645,9 @@ static int exmap_notifier_invalidate_range_start(struct mmu_notifier *mn, const 
     // Only cleanup the exmap_vma when it is the one being unmapped
 	if (ctx->interfaces && ctx->exmap_vma && ctx->exmap_vma == range->vma) {
 		exmap_vma_cleanup(ctx, range->start, range->end);
+	}
+	if (ctx->ptexport_vma && ctx->ptexport_vma == range->vma) {
+		ptexport_vma_cleanup(ctx);
 	}
 	return 0;
 }
@@ -585,6 +689,9 @@ static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
 		vma->vm_private_data = ctx;
 		vm_open(vma);
 		ctx->exmap_vma = vma;
+	} else if (offset == EXMAP_OFF_PTEXPORT) {
+		if (ctx->ptexport_vma) return -EBUSY;
+		return pt_export_mmap(ctx, vma);
 	} else if (offset >= EXMAP_OFF_INTERFACE_BASE && offset <= EXMAP_OFF_INTERFACE_MAX) {
 		int idx = (offset - EXMAP_OFF_INTERFACE_BASE) >> PAGE_SHIFT;
 		struct exmap_interface *interface;
@@ -607,6 +714,7 @@ static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
 	}
 	return 0;
 }
+
 
 static void exmap_mem_free(void *ptr, size_t size) {
 	struct page *page;

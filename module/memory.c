@@ -198,6 +198,16 @@ int exmap_default_pmd_alloc(struct mm_struct *mm, pud_t *pud, unsigned long addr
 	return 0;
 }
 
+/*
+ * pmd_huge() returns 1 if @pmd is hugetlb related entry, that is normal
+ * hugetlb entry or non-present (migration or hwpoisoned) hugetlb entry.
+ * Otherwise, returns 0.
+ */
+int pmd_huge(pmd_t pmd)
+{
+	return !pmd_none(pmd) &&
+		(pmd_val(pmd) & (_PAGE_PRESENT|_PAGE_PSE)) != _PAGE_PRESENT;
+}
 
 
 static inline
@@ -266,6 +276,15 @@ static pmd_t *walk_to_pmd(struct mm_struct *mm, unsigned long addr)
 	return pmd;
 }
 
+pmd_t * exmap_walk_to_pmd(struct vm_area_struct *vma, unsigned long addr) {
+	/* Allocate the PTE if necessary; takes PMD lock once only. */
+	pmd_t * pmd = walk_to_pmd(vma->vm_mm, addr);
+	// Allocate an page table if necessary. This can fail if somebody else does this in parallel.
+	if (pmd)
+		(void) exmap_pte_alloc(vma->vm_mm, pmd);
+	return pmd;
+}
+
 // For add_mm_counter to work inside a module
 void mm_trace_rss_stat(struct mm_struct *mm, int member, long count)
 {
@@ -321,10 +340,7 @@ static int insert_page_in_batch_locked(struct mm_struct *mm, pte_t *pte,
 static int insert_page_fastpath(pte_t *pte, unsigned long addr, struct page *page, pgprot_t prot) {
 	int err;
 	pte_t ptent, new_ptent;
-	err = validate_page_before_insert(page);
-	if (err)
-		return err;
-
+	
 	ptent = ptep_get(pte);
 	if (pte_present(ptent))
 		return -EBUSY;
@@ -743,7 +759,7 @@ more:
 			pte = pte_offset_map(pmd, addr);
 			page = unmap_page_fastpath(pte);
 
-			if (page) {
+			if (page && pages) {
 				list_add(&page->lru, &pages->list);
 				pages->count ++;
 			}
@@ -773,8 +789,10 @@ more:
 				//    pages->count);
 				BUG_ON(!page);
 
-				list_add(&page->lru, &pages->list);
-				pages->count ++;
+				if (pages) {
+					list_add(&page->lru, &pages->list);
+					pages->count ++;
+				}
 
 #ifdef MAPCOUNT
 				mapcount = atomic_add_negative(-1, &page->_mapcount);
