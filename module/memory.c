@@ -338,7 +338,7 @@ static int insert_page_in_batch_locked(struct mm_struct *mm, pte_t *pte,
 
 
 static int insert_page_fastpath(pte_t *pte, unsigned long addr, struct page *page, pgprot_t prot) {
-	int err;
+	int err = 0;
 	pte_t ptent, new_ptent;
 	
 	ptent = ptep_get(pte);
@@ -348,10 +348,13 @@ static int insert_page_fastpath(pte_t *pte, unsigned long addr, struct page *pag
 	// We compare and exchange once.
 	new_ptent = mk_pte(page, prot);
 
-	if (atomic_long_cmpxchg((atomic_long_t*) &(pte->pte), ptent.pte, new_ptent.pte) != ptent.pte)
+	if (unlikely(atomic_long_cmpxchg((atomic_long_t*) &(pte->pte),
+									 ptent.pte,
+									 new_ptent.pte) != ptent.pte)) {
 		err = -EBUSY;
+	}
 
-	return 0;
+	return err;
 }
 
 /* insert_pages() amortizes the cost of spinlock operations
@@ -661,13 +664,16 @@ unmap_page_fastpath(pte_t *pte) {
 		unsigned long pfn = pte_pfn(ptent);
 		struct page *page = pfn_to_page(pfn);
 
-		if (PageUnevictable(page))
+		if (unlikely(PageUnevictable(page)))
 			return NULL;
 
 		new_ptent = native_make_pte(0);
 
-		if (atomic_long_cmpxchg((atomic_long_t*) &(pte->pte), ptent.pte, new_ptent.pte) == ptent.pte)
-			return page;
+		if (unlikely(atomic_long_cmpxchg((atomic_long_t*) &(pte->pte),
+										 ptent.pte, new_ptent.pte) != ptent.pte)) {
+			return NULL;
+		}
+		return page;
 	}
 
 	return NULL;
@@ -694,7 +700,7 @@ unmap_pages(struct vm_area_struct *vma, unsigned long addr, unsigned long num_pa
 
 more:
 	pgd = pgd_offset(mm, addr);
-	if (pgd_none(*pgd)) {
+	if (unlikely(pgd_none(*pgd))) {
 		new_addr = (addr + PGDIR_SIZE) & P4D_MASK;
 		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
 		if (remaining_pages_total <= skip_pages)
@@ -707,7 +713,7 @@ more:
 	}
 
 	p4d = p4d_offset(pgd, addr);
-	if (p4d_none(*p4d)) {
+	if (unlikely(p4d_none(*p4d))) {
 		new_addr = (addr + P4D_SIZE) & PUD_MASK;
 		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
 		if (remaining_pages_total <= skip_pages)
@@ -720,7 +726,7 @@ more:
 	}
 
 	pud = pud_offset(p4d, addr);
-	if (pud_none(*pud)) {
+	if (unlikely(pud_none(*pud))) {
 		new_addr = (addr + PUD_SIZE) & PMD_MASK;
 		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
 		if (remaining_pages_total <= skip_pages)
@@ -733,7 +739,7 @@ more:
 	}
 
 	pmd = pmd_offset(pud, addr);
-	if (pmd_none(*pmd)) {
+	if (unlikely(pmd_none(*pmd))) {
 		new_addr = (addr + PMD_SIZE) & PAGE_MASK;
 		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
 		if (remaining_pages_total <= skip_pages)
@@ -836,6 +842,7 @@ int exmap_unmap_pages( struct vm_area_struct *vma,
 	}
 
 #if 0 // Old and a little slower
+	#error "BAD"
 	pgd = pgd_offset(vma->vm_mm, addr);
 	do {
 		next = pgd_addr_end(addr, end);
