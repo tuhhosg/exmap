@@ -971,7 +971,8 @@ exmap_alloc_from_ivec(struct exmap_ctx *ctx, struct exmap_interface* interface,
 		ret.pages = (int)(free_pages_before - free_pages.count);
 		nr_pages_alloced += ret.pages;
 
-		exmap_debug("alloc: %llu+%d => rc=%d, used=%d",
+		exmap_debug("alloc[%d]: %llu+%d => rc=%d, used=%d",
+					interface - ctx->interfaces,
 					(uint64_t) vec.page, (int)vec.len,
 					(int)ret.res, (int) ret.pages);
 
@@ -1027,10 +1028,9 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 
 		rc = exmap_unmap_pages(vma, uaddr, (int) vec.len, &free_pages);
 
-		exmap_debug("free[%d]: off=%llu, len=%d, freed: %lu",
-				iface,
-					(uint64_t) vec.page, (int) vec.len,
-					free_pages.count - old_free_count);
+		exmap_debug("free[%d]: %llu+%d, => rc=%d freed: %lu",
+					iface, (uint64_t) vec.page, (int) vec.len,
+					rc, free_pages.count - old_free_count);
 
 		if (rc < 0) failed++;
 		vec.res = rc;
