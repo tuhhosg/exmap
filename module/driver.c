@@ -1426,6 +1426,28 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		// 2. Allocate Memory from the system
 		add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size);
 
+#ifdef PRE_ALLOC
+		while (atomic_read(&ctx->alloc_count) < ctx->buffer_size) {
+			struct page* page = exmap_alloc_page_system();
+			if (!page) {
+				pr_err("pre alloc failed at count %d of %lu\n",
+					   atomic_read(&ctx->alloc_count), ctx->buffer_size);
+				break;
+			}
+
+			unsigned iface = atomic_read(&ctx->alloc_count) * ctx->max_interfaces / ctx->buffer_size;
+			/* pr_info("pre alloc, iface %u at count %d of %lu\n", iface, */
+			/* 	   atomic_read(&ctx->alloc_count), ctx->buffer_size); */
+#ifdef USE_GLOBAL_FREE_LIST
+			push_page(page, &ctx->interfaces[iface].local_pages, ctx);
+#else
+			list_add(&page->lru, &ctx->interfaces[iface].free_pages.list);
+			ctx->interfaces[iface].free_pages.count++;
+#endif
+			atomic_inc(&ctx->alloc_count);
+		}
+#endif
+
 		exmap_flags = EXMAP_FLAGS_ACTIVE;
 		if (setup.flags & EXMAP_PAGEFAULT_ALLOC)
 			exmap_flags |= EXMAP_FLAGS_PAGEFAULT_ALLOC;
