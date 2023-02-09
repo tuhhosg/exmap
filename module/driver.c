@@ -261,6 +261,7 @@ struct page* pop_page(struct page_bundle* bundle, struct exmap_ctx* ctx) {
 	} while (1);
 
 failed:
+#if 0
 	pr_warn("exmap_alloc: no page, alloc=%d, alloc_max=%lu\n",
 			atomic_read(&ctx->alloc_count), ctx->buffer_size);
 	for (int i = 0; i < ctx->max_interfaces; i++) {
@@ -268,6 +269,7 @@ failed:
 		pr_info("interface %d: %lu pages in bundle page %lx\n", i,
 				iface->local_pages.count, iface->local_pages.stack);
 	}
+#endif
 	return NULL;
 }
 
@@ -444,7 +446,7 @@ again: // steal_from->free_pages must be locked.
 			}
 		} while(steal_id != first_steal_id);
 
-		pr_info("Steal failed finaly: %lu/%lu", steal_count, desired_count);
+		// pr_info("Steal failed finaly: %lu/%lu", steal_count, desired_count);
 		return -ENOMEM;
 	}
 
@@ -1138,7 +1140,7 @@ exmap_alloc_from_ivec(struct exmap_ctx *ctx, struct exmap_interface* interface,
 						   ivec_len);
 #endif
 	if (rc) {
-		pr_info("First Alloc failed: %d\n", rc);
+		//pr_info("First Alloc failed: %d\n", rc);
 		return rc;
 	}
 
@@ -1184,6 +1186,14 @@ exmap_alloc_from_ivec(struct exmap_ctx *ctx, struct exmap_interface* interface,
 		free_pages_before = free_pages.count;
 		rc = exmap_insert_pages(vma, uaddr, vec.len, &free_pages,
 								NULL, &alloc_ctx);
+		if (rc == -ENOMEM) {
+			for (; idx < ivec_len; idx++) {
+				ret.res = -ENOMEM;
+				ret.pages = 0;
+				WRITE_ONCE(ivec[idx], ret);
+			}
+			break;
+		}
 		if (rc < 0) failed++;
 
 		ret.res = rc;
@@ -1425,6 +1435,28 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 
 		// 2. Allocate Memory from the system
 		add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size);
+
+#ifdef PRE_ALLOC
+		while (atomic_read(&ctx->alloc_count) < ctx->buffer_size) {
+			struct page* page = exmap_alloc_page_system();
+			if (!page) {
+				pr_err("pre alloc failed at count %d of %lu\n",
+					   atomic_read(&ctx->alloc_count), ctx->buffer_size);
+				break;
+			}
+
+			unsigned iface = atomic_read(&ctx->alloc_count) * ctx->max_interfaces / ctx->buffer_size;
+			/* pr_info("pre alloc, iface %u at count %d of %lu\n", iface, */
+			/* 	   atomic_read(&ctx->alloc_count), ctx->buffer_size); */
+#ifdef USE_GLOBAL_FREE_LIST
+			push_page(page, &ctx->interfaces[iface].local_pages, ctx);
+#else
+			list_add(&page->lru, &ctx->interfaces[iface].free_pages.list);
+			ctx->interfaces[iface].free_pages.count++;
+#endif
+			atomic_inc(&ctx->alloc_count);
+		}
+#endif
 
 		exmap_flags = EXMAP_FLAGS_ACTIVE;
 		if (setup.flags & EXMAP_PAGEFAULT_ALLOC)
