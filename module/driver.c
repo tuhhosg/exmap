@@ -600,7 +600,7 @@ static vm_fault_t pt_export_vm_fault(struct vm_fault *vmf) {
 #ifdef USE_GLOBAL_FREE_LIST
 		struct page_bundle temp = {
 			.stack = ptable,
-			.count = 1,
+			.count = 0,
 		};
 		free_pages.bundle = &temp;
 #else
