@@ -22,7 +22,7 @@ struct free_pages {
 	struct exmap_ctx *ctx;
 	/* struct exmap_interface *interface; */
 	struct page_bundle* bundle;
-	unsigned long count;
+	long count;
 };
 #define FREE_PAGES_INIT(name) {.ctx = NULL, .bundle = NULL, .count = 0}
 

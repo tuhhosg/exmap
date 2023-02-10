@@ -12,8 +12,18 @@ struct exmap_ioctl_setup {
 };
 
 #define EXMAP_IOCTL_SETUP _IOC(_IOC_WRITE, 'k', 1, sizeof(struct exmap_ioctl_setup))
+
+struct exmap_ioctl_stats {
+	uint64_t flags;
+	uint64_t buffer_size;
+	uint64_t alloc_count;
+	uint32_t max_interfaces;
+};
+
 #define EXMAP_IOCTL_ACTION _IOC(_IOC_WRITE, 'k', 2, sizeof(struct exmap_action_params))
 #define EXMAP_IOCTL_CLONE _IOC(_IOC_WRITE, 'k', 3, sizeof(int))
+#define EXMAP_IOCTL_STATS _IOC(_IOC_WRITE, 'k', 4, sizeof(struct exmap_ioctl_stats))
+
 
 // Maximum Range of exmap_page.len
 #define EXMAP_PAGE_LEN_BITS 12

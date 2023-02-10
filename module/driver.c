@@ -48,6 +48,8 @@ static struct class *cl; // Global variable for the device class
 
 #define EXMAP_FLAGS_ACTIVE (1 << 0) // Is the exmap still active or in a state of decay/tear down.
 #define EXMAP_FLAGS_PAGEFAULT_ALLOC (1 << 1) // Alloc new memory on a page fault
+#define EXMAP_FLAGS_STEAL (1 << 2) // Alloc new memory on a page fault
+
 
 #ifdef USE_GLOBAL_FREE_LIST
 struct exmap_llist_head {
@@ -1307,6 +1309,19 @@ static exmap_action_fptr exmap_action_array[] = {
 	[EXMAP_OP_FREE]  = &exmap_free,
 };
 
+static long exmap_stats(struct exmap_ioctl_stats *dst, struct exmap_ctx *ctx) {
+	struct exmap_ioctl_stats ret = {0};
+
+	ret.flags = atomic_read(&ctx->flags);
+	ret.max_interfaces = ctx->max_interfaces;
+	ret.buffer_size = ctx->buffer_size;
+	ret.alloc_count = atomic_read(&ctx->alloc_count);
+out:
+	if( copy_to_user(dst, &ret, sizeof(ret)))
+		return -EFAULT;
+	return 0;
+}
+
 static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct exmap_ioctl_setup  setup;
@@ -1459,6 +1474,9 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 #endif
 
 		exmap_flags = EXMAP_FLAGS_ACTIVE;
+#ifndef USE_GLOBAL_FREE_LIST
+		exmap_flags |= EXMAP_FLAGS_STEAL;
+#endif
 		if (setup.flags & EXMAP_PAGEFAULT_ALLOC)
 			exmap_flags |= EXMAP_FLAGS_PAGEFAULT_ALLOC;
 		atomic_set(&ctx->flags, exmap_flags);
@@ -1483,6 +1501,8 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		ctx->clone_of = other_ctx;
 		fput(other_file);
 		return 0;
+	case EXMAP_IOCTL_STATS:
+		return exmap_stats((struct exmap_ioctl_stats *)arg, ctx);
 	case EXMAP_IOCTL_ACTION:
 		if (unlikely(ctx->interfaces == NULL))
 			return -EBADF;
