@@ -1133,21 +1133,19 @@ exmap_alloc_from_ivec(struct exmap_ctx *ctx, struct exmap_interface* interface,
 	if (ivec_len == 0)
 		return failed;
 
-#ifndef USE_GLOBAL_FREE_LIST
-	// Pre-fill our pages store with as many pages as there are
-	// IO-Vectors, assuming that each vector uses at least one page
-	rc = exmap_alloc_pages(ctx, interface, &free_pages,
-						   ivec_len);
-#endif
-	if (rc) {
-		//pr_info("First Alloc failed: %d\n", rc);
-		return rc;
-	}
-
 #ifdef USE_GLOBAL_FREE_LIST
 	free_pages.ctx = ctx;
 	free_pages.bundle = &interface->local_pages;
 	free_pages.count = 0;
+#else
+	// Pre-fill our pages store with as many pages as there are
+	// IO-Vectors, assuming that each vector uses at least one page
+	rc = exmap_alloc_pages(ctx, interface, &free_pages,
+						   ivec_len);
+	if (rc) {
+		//pr_info("First Alloc failed: %d\n", rc);
+		return rc;
+	}
 #endif
 
 	// pr_info("First Alloc: %d\n", free_pages.count);
@@ -1587,7 +1585,13 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 	kiocb->ki_filp = ctx->file_backend;
 
 	total_nr_pages = iov_iter_count(iter) >> PAGE_SHIFT;
-#ifndef USE_GLOBAL_FREE_LIST
+
+#ifdef USE_GLOBAL_FREE_LIST
+	free_pages.ctx = ctx;
+	free_pages.bundle = &interface->local_pages;
+	/* assume we have enough free pages somewhere */
+	free_pages.count = total_nr_pages;
+#else
 	rc_all = exmap_alloc_pages(ctx, interface, &free_pages,
 						   total_nr_pages);
 	if (rc_all != 0) {
