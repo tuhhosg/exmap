@@ -1472,7 +1472,11 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 #endif
 
 		exmap_flags = EXMAP_FLAGS_ACTIVE;
-#ifndef USE_GLOBAL_FREE_LIST
+#ifdef USE_GLOBAL_FREE_LIST
+		// The pagefault handler is currently broken in global free mode
+		if (setup.flags & EXMAP_PAGEFAULT_ALLOC)
+			return -EINVAL;
+#else 
 		exmap_flags |= EXMAP_FLAGS_STEAL;
 #endif
 		if (setup.flags & EXMAP_PAGEFAULT_ALLOC)
