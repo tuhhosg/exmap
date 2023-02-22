@@ -837,6 +837,8 @@ static void exmap_vma_cleanup(struct exmap_ctx *ctx, unsigned long start, unsign
 	for (unsigned idx = 0; idx < ctx->max_interfaces; idx++) {
 		mutex_unlock(&ctx->interfaces[idx].interface_lock);
 	}
+	printk("notifier cleanup: unlocked all interfaces (%d)\n", ctx->max_interfaces);
+
 }
 
 static void exmap_notifier_release(struct mmu_notifier *mn,
@@ -1539,10 +1541,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 	return rc;
 }
 
-static bool validate_iovec(struct exmap_ctx *ctx, struct iovec *iovec) {
-	char __user* addr = iovec->iov_base;
-	ssize_t size = iovec->iov_len;
-
+static bool validate_surface(struct exmap_ctx *ctx, char __user* addr, ssize_t size) {
 	//if (iovec.iov_len != iov_iter_count(iter)) {
 	//	pr_info("exmap: BUG we currently support only iovectors of length 1\n");
 	//	return -EINVAL;
@@ -1589,6 +1588,7 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 		pr_info("max interfaces");
 		return -EINVAL;
 	}
+
 	interface = &ctx->interfaces[iface_id];
 	mutex_lock(&(interface->interface_lock));
 	if (!(atomic_read(&ctx->flags) & EXMAP_FLAGS_ACTIVE)) {
@@ -1599,6 +1599,10 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 	if (action == EXMAP_OP_READ) {
 		if (!ctx->file_backend) {
 			pr_info("file backend??");
+			rc_all = -EINVAL; goto out;
+		}
+		if (!ctx->file_backend->f_op) {
+			pr_info("f_op iter??");
 			rc_all = -EINVAL; goto out;
 		}
 		if (!ctx->file_backend->f_op->read_iter) {
@@ -1626,21 +1630,30 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 		goto out;
 	}
 #endif
-	
 	while (iov_iter_count(iter)) {
-		struct iovec iovec = iov_iter_iovec(iter);
-		char __user* addr = iovec.iov_base;
-		ssize_t size = iovec.iov_len;
-		loff_t  disk_offset = (uintptr_t)addr - ctx->exmap_vma->vm_start;
-		unsigned pages_before, pages_after;
-		unsigned pages_should = size >> PAGE_SHIFT;
+		char __user *addr; ssize_t size;
+		loff_t  disk_offset;
+		unsigned pages_before, pages_after, pages_should;
 		struct iov_iter_state iter_state;
+		if (iter_is_ubuf(iter)) {
+			addr = iter->ubuf;
+			size = iov_iter_count(iter);
+		} else {
+			struct iovec iovec;
+			BUG_ON(!iter_is_iovec(iter));
+			iovec = iov_iter_iovec(iter);
+			addr = iovec.iov_base;
+			size = iovec.iov_len;
+		}
+		
+		disk_offset = (uintptr_t)addr - ctx->exmap_vma->vm_start;
+		pages_should = size >> PAGE_SHIFT;
 
 		//pr_info("exmap: read  @ interface %d: %lu+%lu pages\n", interface - ctx->interfaces,
 		//		disk_offset, pages_should);
 		
 		// Validate that the IO Vector is in our exmap range
-		rc = validate_iovec(ctx, &iovec);
+		rc = validate_surface(ctx, addr, size);
 		if (rc < 0) { rc_all = rc; goto out; }
 
 		BUG_ON(free_pages.count < pages_should);
@@ -1683,7 +1696,7 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 		// rc is the (positive) number of bytes;
 		rc_all += rc;
 
-		iov_iter_advance(iter, iovec.iov_len);
+		iov_iter_advance(iter, size);
 	}
 
 out:
@@ -1737,7 +1750,7 @@ int exmap_uring_cmd(struct io_uring_cmd *ioucmd, unsigned int issue_flags) {
 		ivec = page_to_virt(bvec->bv_page) + bvec->bv_offset;
 		ivec_len = bvec->bv_len / sizeof(struct exmap_iov);
 	} else {
-		rc = validate_iovec(ctx, &cmd->iov);
+		rc = validate_surface(ctx, cmd->iov.iov_base, cmd->iov.iov_len);
 		if (rc < 0) return rc;
 
 		ivec_stack.page = (uintptr_t)(cmd->iov.iov_base - ctx->exmap_vma->vm_start) >> PAGE_SHIFT;
