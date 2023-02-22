@@ -234,16 +234,18 @@ void push_page(struct page* page, struct page_bundle* bundle, struct exmap_ctx* 
 struct page* pop_page(struct page_bundle* bundle, struct exmap_ctx* ctx) {
 	int retries = 4;
 	do {
-		/* pr_info("pop_page: bundle %lx, count %lu, global %lx", bundle, bundle->count, &ctx->global_free_list); */
+		// pr_info("pop_page: bundle %lx, stack=%lx, count %lu, global %lx", bundle, bundle->stack, bundle->count, &ctx->global_free_list);
 		if (bundle->count > 0) {
 			void* stack_page_virt = page_to_virt(bundle->stack);
 			struct page* page = ((struct page**) stack_page_virt)[--bundle->count];
 			/* pr_info("get entry %lu of virt %lx: %lx", bundle->count, stack_page_virt, page); */
+			page->mapping = NULL;
 			return page;
 		}
 		if (bundle->stack) {
 			struct page* page = bundle->stack;
 			bundle->stack = NULL;
+			page->mapping = NULL;
 			return page;
 		}
 
