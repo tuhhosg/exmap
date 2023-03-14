@@ -4,6 +4,15 @@
 
 #define STATIC_ASSERT(COND,MSG) typedef char static_assertion_##MSG[(!!(COND))*2-1]
 
+struct exmap_action_params {
+	uint16_t interface;
+	uint16_t iov_len;
+	uint16_t opcode; // exmap_opcode
+	uint64_t flags;  // exmap_flags
+};
+
+#define EXMAP_IOCTL_ACTION _IOC(_IOC_WRITE, 'k', 2, sizeof(struct exmap_action_params))
+
 struct exmap_ioctl_setup {
 	int    fd;
 	int    max_interfaces;
@@ -12,7 +21,6 @@ struct exmap_ioctl_setup {
 };
 
 #define EXMAP_IOCTL_SETUP _IOC(_IOC_WRITE, 'k', 1, sizeof(struct exmap_ioctl_setup))
-
 
 // Maximum Range of exmap_page.len
 #define EXMAP_PAGE_LEN_BITS 12
