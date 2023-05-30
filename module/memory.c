@@ -395,7 +395,7 @@ more:
 		// Fastpath for single page in this PMD
 		if (pages_to_write_in_pmd == 1) {
 #ifdef USE_GLOBAL_FREE_LIST
-			struct page* page = pop_page(free_pages->bundle, free_pages->ctx);
+			struct page* page = pop_page(free_pages->bundle, free_pages->ctx->memory_pool);
 			if (!page)
 				return -ENOMEM;
 #else
@@ -409,7 +409,7 @@ more:
 
 			if (unlikely(err)) { // Insert failed, somebody else was faster
 #ifdef USE_GLOBAL_FREE_LIST
-				push_page(page, free_pages->bundle, free_pages->ctx);
+				push_page(page, free_pages->bundle, free_pages->ctx->memory_pool);
 #else
 				list_add(&page->lru, &free_pages->list);
 #endif
@@ -427,7 +427,7 @@ more:
 		start_pte = pte_offset_map_lock(mm, pmd, addr, &pte_lock);
 		for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {
 #ifdef USE_GLOBAL_FREE_LIST
-			struct page* page = pop_page(free_pages->bundle, free_pages->ctx);
+			struct page* page = pop_page(free_pages->bundle, free_pages->ctx->memory_pool);
 			if (!page)
 				return -ENOMEM;
 #else
@@ -644,7 +644,7 @@ more:
 
 			if (page && free_pages) {
 #ifdef USE_GLOBAL_FREE_LIST
-			    push_page(page, free_pages->bundle, free_pages->ctx);
+			    push_page(page, free_pages->bundle, free_pages->ctx->memory_pool);
 #else
 				list_add(&page->lru, &free_pages->list);
 #endif
@@ -678,7 +678,7 @@ more:
 
 				if (free_pages) {
 #ifdef USE_GLOBAL_FREE_LIST
-					push_page(page, free_pages->bundle, free_pages->ctx);
+					push_page(page, free_pages->bundle, free_pages->ctx->memory_pool);
 #else
 					list_add(&page->lru, &free_pages->list);
 #endif

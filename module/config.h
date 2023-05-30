@@ -7,4 +7,4 @@
 // #define HANDLE_PAGE_FAULT
 // #define PRE_ALLOC
 
-// #define USE_GLOBAL_FREE_LIST
+#define USE_GLOBAL_FREE_LIST

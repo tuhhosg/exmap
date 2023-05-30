@@ -2,9 +2,11 @@
 
 #include <linux/mm.h>
 #include <linux/list.h>
+#include <linux/mmu_notifier.h>
 
 #include "config.h"
 #include "linux/exmap.h"
+#include "../memory_pool/memory_pool.h"
 
 
 struct iface_count {
@@ -17,6 +19,38 @@ struct iface_count {
 #endif
 };
 
+struct exmap_ctx {
+	struct exmap_ctx *clone_of;
+
+	size_t buffer_size;
+	atomic_t alloc_count;
+
+	/* Only used for accounting purposes */
+	struct user_struct		*user;
+	struct mm_struct		*mm_account;
+
+	/* Here is the main buffer located */
+	struct vm_area_struct *exmap_vma;
+
+	/* Here is the ptexport buffer located */
+	struct vm_area_struct *ptexport_vma;
+
+	/* The baking storage */
+	struct file *file_backend;
+	struct block_device *bdev;
+
+	/* Interfaces are memory mapped areas where the kernel can communicate with the user */
+	atomic_t    flags;
+	int    max_interfaces;
+	struct exmap_interface *interfaces;
+
+/* #ifdef USE_GLOBAL_FREE_LIST */
+/* 	struct exmap_llist_head global_free_list; */
+/* #endif */
+	struct memory_pool_ctx* memory_pool;
+
+	struct mmu_notifier mmu_notifier;
+};
 #ifdef USE_GLOBAL_FREE_LIST
 struct free_pages {
 	struct exmap_ctx *ctx;
@@ -26,12 +60,12 @@ struct free_pages {
 };
 #define FREE_PAGES_INIT(name) {.ctx = NULL, .bundle = NULL, .count = 0}
 
-struct page_bundle {
-	struct page* stack;
-	unsigned long count;
-};
-void push_page(struct page* page, struct page_bundle* bundle, struct exmap_ctx* ctx);
-struct page* pop_page(struct page_bundle* bundle, struct exmap_ctx* ctx);
+/* struct page_bundle { */
+/* 	struct page* stack; */
+/* 	unsigned long count; */
+/* }; */
+/* void push_page(struct page* page, struct page_bundle* bundle, struct exmap_ctx* ctx); */
+/* struct page* pop_page(struct page_bundle* bundle, struct exmap_ctx* ctx); */
 
 #else
 struct free_pages {

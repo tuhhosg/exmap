@@ -18,7 +18,6 @@
 #include <linux/sched/mm.h>
 #include <linux/cdev.h>
 #include <linux/random.h>
-#include <linux/mmu_notifier.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 #include <linux/io_uring.h>
 #include <linux/io_uring_types.h>
@@ -41,7 +40,6 @@
 #include "ksyms.h"
 #include "config.h"
 
-
 static dev_t first;
 static struct cdev cdev;
 static struct class *cl; // Global variable for the device class
@@ -51,43 +49,12 @@ static struct class *cl; // Global variable for the device class
 #define EXMAP_FLAGS_STEAL (1 << 2) // Alloc new memory on a page fault
 
 
-#ifdef USE_GLOBAL_FREE_LIST
-struct exmap_llist_head {
-	struct page *first;
-};
-#endif
+/* #ifdef USE_GLOBAL_FREE_LIST */
+/* struct exmap_llist_head { */
+/* 	struct page *first; */
+/* }; */
+/* #endif */
 
-struct exmap_ctx {
-	struct exmap_ctx *clone_of;
-
-	size_t buffer_size;
-	atomic_t alloc_count;
-
-	/* Only used for accounting purposes */
-	struct user_struct		*user;
-	struct mm_struct		*mm_account;
-
-	/* Here is the main buffer located */
-	struct vm_area_struct *exmap_vma;
-
-	/* Here is the ptexport buffer located */
-	struct vm_area_struct *ptexport_vma;
-
-	/* The baking storage */
-	struct file *file_backend;
-	struct block_device *bdev;
-
-	/* Interfaces are memory mapped areas where the kernel can communicate with the user */
-	atomic_t    flags;
-	int    max_interfaces;
-	struct exmap_interface *interfaces;
-
-#ifdef USE_GLOBAL_FREE_LIST
-	struct exmap_llist_head global_free_list;
-#endif
-
-	struct mmu_notifier mmu_notifier;
-};
 
 static inline
 struct exmap_ctx * exmap_from_file(struct file *file) {
@@ -100,184 +67,184 @@ struct exmap_ctx * exmap_from_file(struct file *file) {
 ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter);
 
 
-#ifdef USE_GLOBAL_FREE_LIST
+/* #ifdef USE_GLOBAL_FREE_LIST */
 
-#define TAG_BITS 6ULL
-#define TAG_LIMIT (1ULL << (TAG_BITS))
-#define TAG_MASK (TAG_LIMIT - 1)
+/* #define TAG_BITS 6ULL */
+/* #define TAG_LIMIT (1ULL << (TAG_BITS)) */
+/* #define TAG_MASK (TAG_LIMIT - 1) */
 
-static inline unsigned get_tag(struct page* page) {
-	return ((uintptr_t) page) & TAG_MASK;
-}
+/* static inline unsigned get_tag(struct page* page) { */
+/* 	return ((uintptr_t) page) & TAG_MASK; */
+/* } */
 
-/** @return the correctly aligned pagep with zeroes in the first bits */
-static inline struct page* get_without_tag(struct page* page) {
-	return (struct page*) ((uintptr_t) page & ~TAG_MASK);
-}
+/* /\** @return the correctly aligned pagep with zeroes in the first bits *\/ */
+/* static inline struct page* get_without_tag(struct page* page) { */
+/* 	return (struct page*) ((uintptr_t) page & ~TAG_MASK); */
+/* } */
 
-static inline struct page* construct_with_tag(struct page* page, unsigned tag) {
-	if (!page)
-		return NULL;
+/* static inline struct page* construct_with_tag(struct page* page, unsigned tag) { */
+/* 	if (!page) */
+/* 		return NULL; */
 
-	struct page* clean = get_without_tag(page);
-	return (struct page*) ((uintptr_t) clean | (tag % TAG_LIMIT));
-}
+/* 	struct page* clean = get_without_tag(page); */
+/* 	return (struct page*) ((uintptr_t) clean | (tag % TAG_LIMIT)); */
+/* } */
 
-static bool exmap_llist_push(struct page *new_first, struct exmap_llist_head *head)
-{
-	struct page *first;
+/* static bool exmap_llist_push(struct page *new_first, struct exmap_llist_head *head) */
+/* { */
+/* 	struct page *first; */
 
-	/* pages coming in must not have a tag set */
-	BUG_ON(new_first != get_without_tag(new_first));
+/* 	/\* pages coming in must not have a tag set *\/ */
+/* 	BUG_ON(new_first != get_without_tag(new_first)); */
 
-	do {
-		/* there may be a tag left over from the previous loop iteration */
-		new_first = get_without_tag(new_first);
+/* 	do { */
+/* 		/\* there may be a tag left over from the previous loop iteration *\/ */
+/* 		new_first = get_without_tag(new_first); */
 
-		/* current first list entry */
-		first = READ_ONCE(head->first);
-		/* the next-pointer of the new first list entry */
-		new_first->mapping = (struct address_space*) get_without_tag(first);
+/* 		/\* current first list entry *\/ */
+/* 		first = READ_ONCE(head->first); */
+/* 		/\* the next-pointer of the new first list entry *\/ */
+/* 		new_first->mapping = (struct address_space*) get_without_tag(first); */
 
-		/* new first entry keeps tag of previous first */
-		new_first = construct_with_tag(new_first, get_tag(first));
-	} while (cmpxchg(&head->first, first, new_first) != first);
+/* 		/\* new first entry keeps tag of previous first *\/ */
+/* 		new_first = construct_with_tag(new_first, get_tag(first)); */
+/* 	} while (cmpxchg(&head->first, first, new_first) != first); */
 
-	return !first;
-}
+/* 	return !first; */
+/* } */
 
-static struct page *exmap_llist_pop(struct exmap_llist_head *head)
-{
-	struct page *entry, *old_entry, *next;
+/* static struct page *exmap_llist_pop(struct exmap_llist_head *head) */
+/* { */
+/* 	struct page *entry, *old_entry, *next; */
 
-	entry = smp_load_acquire(&head->first);
-	for (;;) {
-		if (entry == NULL)
-			return NULL;
+/* 	entry = smp_load_acquire(&head->first); */
+/* 	for (;;) { */
+/* 		if (entry == NULL) */
+/* 			return NULL; */
 
-		old_entry = entry;
-		next = (struct page*) READ_ONCE(get_without_tag(entry)->mapping);
-		/* next / new first entry has tag of previous first + 1 */
-		next = construct_with_tag(next, get_tag(old_entry) + 1);
+/* 		old_entry = entry; */
+/* 		next = (struct page*) READ_ONCE(get_without_tag(entry)->mapping); */
+/* 		/\* next / new first entry has tag of previous first + 1 *\/ */
+/* 		next = construct_with_tag(next, get_tag(old_entry) + 1); */
 
-		entry = cmpxchg(&head->first, old_entry, next);
-		if (entry == old_entry)
-			break;
-	}
+/* 		entry = cmpxchg(&head->first, old_entry, next); */
+/* 		if (entry == old_entry) */
+/* 			break; */
+/* 	} */
 
-	return get_without_tag(entry);
-}
+/* 	return get_without_tag(entry); */
+/* } */
 
-static inline struct page *exmap_llist_del_all(struct exmap_llist_head *head)
-{
-	return get_without_tag(xchg(&head->first, NULL));
-}
+/* static inline struct page *exmap_llist_del_all(struct exmap_llist_head *head) */
+/* { */
+/* 	return get_without_tag(xchg(&head->first, NULL)); */
+/* } */
 
-void push_bundle(struct page_bundle bundle, struct exmap_ctx* ctx) {
-	BUG_ON(bundle.count != 512);
-	/* pr_info("push_bundle: add %lx ([0]=%lx, [511]=%lx)", bundle.stack, */
-	/* 		((struct page**) page_to_virt(bundle.stack))[0], */
-	/* 		((struct page**) page_to_virt(bundle.stack))[511] */
-	/* 	); */
+/* void push_bundle(struct page_bundle bundle, struct exmap_ctx* ctx) { */
+/* 	BUG_ON(bundle.count != 512); */
+/* 	/\* pr_info("push_bundle: add %lx ([0]=%lx, [511]=%lx)", bundle.stack, *\/ */
+/* 	/\* 		((struct page**) page_to_virt(bundle.stack))[0], *\/ */
+/* 	/\* 		((struct page**) page_to_virt(bundle.stack))[511] *\/ */
+/* 	/\* 	); *\/ */
 
-	preempt_disable();
-	exmap_llist_push(bundle.stack, &ctx->global_free_list);
-	preempt_enable();
-}
+/* 	preempt_disable(); */
+/* 	exmap_llist_push(bundle.stack, &ctx->global_free_list); */
+/* 	preempt_enable(); */
+/* } */
 
-struct page_bundle pop_bundle(struct exmap_ctx* ctx) {
-	struct page* page;
-	preempt_disable();
-	page = exmap_llist_pop(&ctx->global_free_list);
-	preempt_enable();
+/* struct page_bundle pop_bundle(struct exmap_ctx* ctx) { */
+/* 	struct page* page; */
+/* 	preempt_disable(); */
+/* 	page = exmap_llist_pop(&ctx->global_free_list); */
+/* 	preempt_enable(); */
 
-	if (!page) {
-		struct page_bundle ret = {
-			.stack = NULL,
-			.count = 0};
-		/* pr_info("pop_bundle: global free list empty"); */
-		return ret;
-	}
+/* 	if (!page) { */
+/* 		struct page_bundle ret = { */
+/* 			.stack = NULL, */
+/* 			.count = 0}; */
+/* 		/\* pr_info("pop_bundle: global free list empty"); *\/ */
+/* 		return ret; */
+/* 	} */
 
-	struct page_bundle ret = {
-		.stack = page,
-		.count = 512,
-	};
-	/* pr_info("pop_bundle: get %lx ([0]=%lx, [511]=%lx), first was %lx, now %lx", ret.stack, */
-	/* 		((struct page**) page_to_virt(ret.stack))[0], */
-	/* 		((struct page**) page_to_virt(ret.stack))[511], */
-	/* 		page, ctx->global_free_list.first); */
-	return ret;
-}
+/* 	struct page_bundle ret = { */
+/* 		.stack = page, */
+/* 		.count = 512, */
+/* 	}; */
+/* 	/\* pr_info("pop_bundle: get %lx ([0]=%lx, [511]=%lx), first was %lx, now %lx", ret.stack, *\/ */
+/* 	/\* 		((struct page**) page_to_virt(ret.stack))[0], *\/ */
+/* 	/\* 		((struct page**) page_to_virt(ret.stack))[511], *\/ */
+/* 	/\* 		page, ctx->global_free_list.first); *\/ */
+/* 	return ret; */
+/* } */
 
 
-void push_page(struct page* page, struct page_bundle* bundle, struct exmap_ctx* ctx) {
-	/* pr_info("push_page: %lx, bundle %lx, count %lu, global %lx", page, bundle, bundle->count, global_free_list); */
+/* void push_page(struct page* page, struct page_bundle* bundle, struct exmap_ctx* ctx) { */
+/* 	/\* pr_info("push_page: %lx, bundle %lx, count %lu, global %lx", page, bundle, bundle->count, global_free_list); *\/ */
 
-	BUG_ON(!page);
+/* 	BUG_ON(!page); */
 
-	if (!bundle->stack) {
-		bundle->stack = page;
-		return;
-	}
-	void* stack_page_virt = page_to_virt(bundle->stack);
-	((struct page**) stack_page_virt)[bundle->count++] = page;
-	/* pr_info("set entry %lu of virt %lx: %lx", bundle->count-1, stack_page_virt, page); */
+/* 	if (!bundle->stack) { */
+/* 		bundle->stack = page; */
+/* 		return; */
+/* 	} */
+/* 	void* stack_page_virt = page_to_virt(bundle->stack); */
+/* 	((struct page**) stack_page_virt)[bundle->count++] = page; */
+/* 	/\* pr_info("set entry %lu of virt %lx: %lx", bundle->count-1, stack_page_virt, page); *\/ */
 
-	if (bundle->count == 512) {
-		push_bundle(*bundle, ctx);
-		bundle->count = 0;
-		bundle->stack = NULL;
-	}
-}
+/* 	if (bundle->count == 512) { */
+/* 		push_bundle(*bundle, ctx); */
+/* 		bundle->count = 0; */
+/* 		bundle->stack = NULL; */
+/* 	} */
+/* } */
 
-struct page* pop_page(struct page_bundle* bundle, struct exmap_ctx* ctx) {
-	int retries = 4;
-	do {
-		// pr_info("pop_page: bundle %lx, stack=%lx, count %lu, global %lx", bundle, bundle->stack, bundle->count, &ctx->global_free_list);
-		if (bundle->count > 0) {
-			void* stack_page_virt = page_to_virt(bundle->stack);
-			struct page* page = ((struct page**) stack_page_virt)[--bundle->count];
-			/* pr_info("get entry %lu of virt %lx: %lx", bundle->count, stack_page_virt, page); */
-			page->mapping = NULL;
-			return page;
-		}
-		if (bundle->stack) {
-			struct page* page = bundle->stack;
-			bundle->stack = NULL;
-			page->mapping = NULL;
-			return page;
-		}
+/* struct page* pop_page(struct page_bundle* bundle, struct exmap_ctx* ctx) { */
+/* 	int retries = 4; */
+/* 	do { */
+/* 		// pr_info("pop_page: bundle %lx, stack=%lx, count %lu, global %lx", bundle, bundle->stack, bundle->count, &ctx->global_free_list); */
+/* 		if (bundle->count > 0) { */
+/* 			void* stack_page_virt = page_to_virt(bundle->stack); */
+/* 			struct page* page = ((struct page**) stack_page_virt)[--bundle->count]; */
+/* 			/\* pr_info("get entry %lu of virt %lx: %lx", bundle->count, stack_page_virt, page); *\/ */
+/* 			page->mapping = NULL; */
+/* 			return page; */
+/* 		} */
+/* 		if (bundle->stack) { */
+/* 			struct page* page = bundle->stack; */
+/* 			bundle->stack = NULL; */
+/* 			page->mapping = NULL; */
+/* 			return page; */
+/* 		} */
 
-		*bundle = pop_bundle(ctx);
-		if (bundle->count == 0) {
-			/* pr_info("pop_page: new bundle empty, allocating page from system if possible\n"); */
-			if (unlikely(atomic_read(&ctx->alloc_count) < ctx->buffer_size)) {
-				struct page* page = exmap_alloc_page_system();
-				if (page) {
-					atomic_inc(&ctx->alloc_count);
-					return page;
-				}
-			}
-			if (retries-- == 0)
-				goto failed;
-		}
-	} while (1);
+/* 		*bundle = pop_bundle(ctx); */
+/* 		if (bundle->count == 0) { */
+/* 			/\* pr_info("pop_page: new bundle empty, allocating page from system if possible\n"); *\/ */
+/* 			if (unlikely(atomic_read(&ctx->alloc_count) < ctx->buffer_size)) { */
+/* 				struct page* page = exmap_alloc_page_system(); */
+/* 				if (page) { */
+/* 					atomic_inc(&ctx->alloc_count); */
+/* 					return page; */
+/* 				} */
+/* 			} */
+/* 			if (retries-- == 0) */
+/* 				goto failed; */
+/* 		} */
+/* 	} while (1); */
 
-failed:
-#if 0
-	pr_warn("exmap_alloc: no page, alloc=%d, alloc_max=%lu\n",
-			atomic_read(&ctx->alloc_count), ctx->buffer_size);
-	for (int i = 0; i < ctx->max_interfaces; i++) {
-		struct exmap_interface* iface = &ctx->interfaces[i];
-		pr_info("interface %d: %lu pages in bundle page %lx\n", i,
-				iface->local_pages.count, iface->local_pages.stack);
-	}
-#endif
-	return NULL;
-}
+/* failed: */
+/* #if 0 */
+/* 	pr_warn("exmap_alloc: no page, alloc=%d, alloc_max=%lu\n", */
+/* 			atomic_read(&ctx->alloc_count), ctx->buffer_size); */
+/* 	for (int i = 0; i < ctx->max_interfaces; i++) { */
+/* 		struct exmap_interface* iface = &ctx->interfaces[i]; */
+/* 		pr_info("interface %d: %lu pages in bundle page %lx\n", i, */
+/* 				iface->local_pages.count, iface->local_pages.stack); */
+/* 	} */
+/* #endif */
+/* 	return NULL; */
+/* } */
 
-#endif	/* USE_GLOBAL_FREE_LIST */
+/* #endif	/\* USE_GLOBAL_FREE_LIST *\/ */
 
 
 
@@ -698,24 +665,25 @@ static void vm_close(struct vm_area_struct *vma) {
 #endif
 	}
 
-#ifdef USE_GLOBAL_FREE_LIST
-	/* free remaining global list entries */
-	pr_info("vm_close: free global list entries (%lu from interfaces)\n", freed_pages);
+/* #ifdef USE_GLOBAL_FREE_LIST */
+/* 	/\* free remaining global list entries *\/ */
+/* 	pr_info("vm_close: free global list entries (%lu from interfaces)\n", freed_pages); */
 
-	struct page* node = exmap_llist_del_all(&ctx->global_free_list);
-	while (node) {
-		struct page* stack = node;
-		node = get_without_tag((struct page*) node->mapping);
+/* 	struct page* node = exmap_llist_del_all(&ctx->global_free_list); */
+/* 	while (node) { */
+/* 		struct page* stack = node; */
+/* 		node = get_without_tag((struct page*) node->mapping); */
 
-		freed_pages += exmap_free_stack(stack, 512);
+/* 		freed_pages += exmap_free_stack(stack, 512); */
 
-		/* When this gets triggered, the global list is corrupted */
-		if (node && node == get_without_tag((struct page*) node->mapping)) {
-			pr_err("vm_close: circular global list node (%lx) == node->next", node);
-			break;
-		}
-	}
-#endif
+/* 		/\* When this gets triggered, the global list is corrupted *\/ */
+/* 		if (node && node == get_without_tag((struct page*) node->mapping)) { */
+/* 			pr_err("vm_close: circular global list node (%lx) == node->next", node); */
+/* 			break; */
+/* 		} */
+/* 	} */
+/* #endif */
+	memory_pool_destroy(ctx->memory_pool);
 
 	add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * ctx->buffer_size);
 
@@ -1415,9 +1383,10 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			return -ENOMEM;
 		}
 
-#ifdef USE_GLOBAL_FREE_LIST
-		ctx->global_free_list.first = NULL;
-#endif
+/* #ifdef USE_GLOBAL_FREE_LIST */
+/* 		ctx->global_free_list.first = NULL; */
+/* #endif */
+
 
 		for (idx = 0; idx < ctx->max_interfaces; idx++) {
 			interface = &ctx->interfaces[idx];
@@ -1452,6 +1421,12 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 
 		// 2. Allocate Memory from the system
 		add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size);
+
+		struct memory_pool_setup pool_setup = {
+			.pool_size = ctx->buffer_size,
+		};
+		struct memory_pool_ctx* pool_ctx = memory_pool_create(&pool_setup);
+		ctx->memory_pool = pool_ctx;
 
 #ifdef PRE_ALLOC
 		while (atomic_read(&ctx->alloc_count) < ctx->buffer_size) {

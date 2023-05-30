@@ -36,11 +36,12 @@
 
 
 
-#include "linux/memory_pool.h"
 #include "driver.h"
 /* #include "ksyms.h" */
 /* #include "config.h" */
 
+unsigned active_memory_pools;
+static struct memory_pool_ctx* MEMORY_POOLS[64];
 
 /* static dev_t first; */
 /* static struct cdev cdev; */
@@ -51,10 +52,6 @@
 #define EXMAP_FLAGS_PAGEFAULT_ALLOC (1 << 1) // Alloc new memory on a page fault
 #define EXMAP_FLAGS_STEAL (1 << 2) // Alloc new memory on a page fault
 
-
-struct exmap_llist_head {
-	struct page *first;
-};
 
 /* struct exmap_ctx { */
 /* 	/\* struct exmap_ctx *clone_of; *\/ */
@@ -86,36 +83,9 @@ struct exmap_llist_head {
 /* 	struct mmu_notifier mmu_notifier; */
 /* }; */
 
-struct memory_pool_setup {
-	size_t pool_size;
-};
 
-struct memory_pool_ctx {
-	size_t pool_size;
+/* typedef void* memory_pool_t; */
 
-	/*
-	 * One "helper" bundle to push pages into
-	 * when full. The contents of this bundle are moved
-	 * to the pool bundle_list
-	 */
-	struct page_bundle pool_bundle;
-
-	/*
-	* The bundle list contains, as the name implies,
-	* bundles of free pages.
-	* Specifically, it contains single struct page*s, whose underlying
-	* memory is sequentially filled with 512 addresses of further free pages.
-	* See also: <struct page_bundle> 
-	*/
-	struct exmap_llist_head bundle_list;
-
-	/* Only used for accounting purposes */
-	struct user_struct		*user;
-	struct mm_struct		*mm_account;
-};
-static struct memory_pool_ctx ctx;
-
-typedef void* memory_pool_t;
 
 /* static inline */
 /* struct exmap_ctx * exmap_from_file(struct file *file) { */
@@ -149,7 +119,7 @@ static inline struct page* construct_with_tag(struct page* page, unsigned tag) {
 	return (struct page*) ((uintptr_t) clean | (tag % TAG_LIMIT));
 }
 
-static bool exmap_llist_push(struct page *new_first, struct exmap_llist_head *head)
+static bool bundle_list_push(struct page *new_first, struct exmap_llist_head *head)
 {
 	struct page *first;
 
@@ -172,7 +142,7 @@ static bool exmap_llist_push(struct page *new_first, struct exmap_llist_head *he
 	return !first;
 }
 
-static struct page *exmap_llist_pop(struct exmap_llist_head *head)
+static struct page *bundle_list_pop(struct exmap_llist_head *head)
 {
 	struct page *entry, *old_entry, *next;
 
@@ -203,14 +173,14 @@ void push_bundle(struct page_bundle bundle, struct memory_pool_ctx* ctx) {
 	BUG_ON(bundle.count != 512);
 
 	preempt_disable();
-	exmap_llist_push(bundle.stack, &ctx->bundle_list);
+	bundle_list_push(bundle.stack, &ctx->bundle_list);
 	preempt_enable();
 }
 
 struct page_bundle pop_bundle(struct memory_pool_ctx* ctx) {
 	struct page* page;
 	preempt_disable();
-	page = exmap_llist_pop(&ctx->bundle_list);
+	page = bundle_list_pop(&ctx->bundle_list);
 	preempt_enable();
 
 	if (!page) {
@@ -291,6 +261,7 @@ failed:
 #endif
 	return NULL;
 }
+EXPORT_SYMBOL(pop_page);
 
 
 
@@ -1521,13 +1492,15 @@ static void *exmap_mem_alloc(size_t size)
 /*     asm volatile("mov %0,%%cr0": "+r" (val) : : "memory"); */
 /* } */
 
-size_t pool_create(struct memory_pool_setup* setup) {
+struct memory_pool_ctx* memory_pool_create(struct memory_pool_setup* setup) {
+	struct memory_pool_ctx* ctx = vmalloc(sizeof(struct memory_pool_ctx));
+
 	size_t alloc_count = 0;
 
 	pr_info("memory_pool: init size (4K pages) = %ld\n", setup->pool_size);
 
 	/* TODO: checks? */
-	ctx.pool_size = setup->pool_size;
+	ctx->pool_size = setup->pool_size;
 
 	// // Account for the locked memory
 	// rc = pool_account_mem(ctx, pool_size);
@@ -1538,20 +1511,20 @@ size_t pool_create(struct memory_pool_setup* setup) {
 	/* ctx->buffer_size += setup.buffer_size; */
 	/* atomic_set(&ctx->alloc_count, 0); */
 
-	ctx.bundle_list.first = NULL;
+	ctx->bundle_list.first = NULL;
 
 	/* // Allocate Memory from the system */
 	/* add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size); */
 
 	
-	while (alloc_count < ctx.pool_size) {
+	while (alloc_count < ctx->pool_size) {
 		struct page* page = exmap_alloc_page_system();
 		if (!page) {
 			pr_err("pre alloc failed at count %lu of %lu\n",
-					alloc_count, ctx.pool_size);
+					alloc_count, ctx->pool_size);
 			break;
 		}
-		push_page(page, &ctx.pool_bundle, &ctx);
+		push_page(page, &ctx->pool_bundle, ctx);
 		alloc_count++;
 	}
 
@@ -1565,11 +1538,12 @@ size_t pool_create(struct memory_pool_setup* setup) {
 	/* atomic_set(&ctx->flags, exmap_flags); */
 
 	/* TODO: return pool handle */
-	return 0;
+	MEMORY_POOLS[active_memory_pools++] = ctx;
+	return ctx;
 }
-EXPORT_SYMBOL(pool_create);
+EXPORT_SYMBOL(memory_pool_create);
 
-void pool_destroy(struct memory_pool_ctx* ctx) {
+void memory_pool_destroy(struct memory_pool_ctx* ctx) {
 	unsigned long freed_pages = 0;
 
 	freed_pages += exmap_free_stack(ctx->pool_bundle.stack, ctx->pool_bundle.count);
@@ -1592,7 +1566,15 @@ void pool_destroy(struct memory_pool_ctx* ctx) {
 
 /* 	// Raise the locked_vm_pages again */
 /* 	// exmap_unaccount_mem(ctx, ctx->buffer_size); */
+
+	MEMORY_POOLS[active_memory_pools] = NULL;
+	active_memory_pools--;
+
+	pr_info("memory_pool: freed %d with %lu pages\n", active_memory_pools, freed_pages);
+
+	vfree(ctx);
 }
+EXPORT_SYMBOL(memory_pool_destroy);
 
 static int memory_pool_init_module(void) {
 	/* unsigned long cr0; */
@@ -1622,12 +1604,9 @@ static int memory_pool_init_module(void) {
 	/* /\* re-enable write protection *\/ */
     /* custom_write_cr0(cr0); */
 
-	struct memory_pool_setup setup = {
-		.pool_size = 2 * 1024 * 1024,
-	};
-	pool_create(&setup);
+	active_memory_pools = 0;
 
-	pr_info("memory_pool registered\n");
+	pr_info("memory_pool module loaded\n");
 
 	return 0;
 
@@ -1659,10 +1638,15 @@ static void memory_pool_cleanup_module(void) {
 
 	/* /\* re-enable write protection *\/ */
     /* custom_write_cr0(cr0); */
-	
-	pool_destroy(&ctx);
 
-	pr_info("memory_pool unregistered\n");
+	int i;
+	
+	for (i = 0; i < active_memory_pools; i++)
+		memory_pool_destroy(MEMORY_POOLS[i]);
+
+	active_memory_pools = 0;
+
+	pr_info("memory_pool module unloaded\n");
 }
 
 module_init(memory_pool_init_module)

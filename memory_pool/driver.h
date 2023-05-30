@@ -4,7 +4,7 @@
 #include <linux/list.h>
 
 #include "config.h"
-#include "linux/memory_pool.h"
+#include "../memory_pool/memory_pool.h"
 
 
 /* struct iface_count { */
@@ -21,10 +21,6 @@ struct free_pages {
 };
 #define FREE_PAGES_INIT(name) {.ctx = NULL, .bundle = NULL, .count = 0}
 
-struct page_bundle {
-	struct page* stack;
-	unsigned long count;
-};
 /* void push_page(struct page* page, struct page_bundle* bundle, struct memory_pool_ctx* ctx); */
 /* struct page* pop_page(struct page_bundle* bundle, struct exmap_ctx* ctx); */
 
