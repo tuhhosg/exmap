@@ -45,3 +45,5 @@ void memory_pool_destroy(struct memory_pool_ctx* ctx);
 
 struct page* pop_page(struct page_bundle* bundle, struct memory_pool_ctx* ctx);
 void push_page(struct page* page, struct page_bundle* bundle, struct memory_pool_ctx* ctx);
+
+unsigned free_page_bundle(struct page* bundle_page, unsigned count);

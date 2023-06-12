@@ -210,7 +210,7 @@ struct page* alloc_page_system(void) {
 }
 
 
-unsigned free_bundle(struct page* bundle_page, unsigned count) {
+unsigned free_page_bundle(struct page* bundle_page, unsigned count) {
 	unsigned freed_pages = 0;
 
 	/* interface-local free pages bundle can temporarily be NULL until the next page gets pushed */
@@ -233,6 +233,7 @@ unsigned free_bundle(struct page* bundle_page, unsigned count) {
 
 	return freed_pages;
 }
+EXPORT_SYMBOL(free_page_bundle);
 
 struct memory_pool_ctx* memory_pool_create(struct memory_pool_setup* setup) {
 	struct memory_pool_ctx* ctx = vmalloc(sizeof(struct memory_pool_ctx));
@@ -288,14 +289,14 @@ EXPORT_SYMBOL(memory_pool_create);
 void memory_pool_destroy(struct memory_pool_ctx* ctx) {
 	unsigned long freed_pages = 0;
 
-	freed_pages += free_bundle(ctx->pool_bundle.stack, ctx->pool_bundle.count);
+	freed_pages += free_page_bundle(ctx->pool_bundle.stack, ctx->pool_bundle.count);
 
 	struct page* node = bundle_list_del_all(&ctx->bundle_list);
 	while (node) {
 		struct page* stack = node;
 		node = get_without_tag((struct page*) node->mapping);
 
-		freed_pages += free_bundle(stack, 512);
+		freed_pages += free_page_bundle(stack, 512);
 
 		/* When this gets triggered, the global list is corrupted */
 		if (node && node == get_without_tag((struct page*) node->mapping)) {
