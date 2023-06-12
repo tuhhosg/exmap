@@ -514,8 +514,6 @@ void pmd_clear_bad(pmd_t *pmd)
 
 static struct page*
 unmap_page_fastpath(pte_t *pte) {
-	int err;
-	struct page* page;
 	pte_t ptent, new_ptent;
 
 	ptent = ptep_get(pte);
@@ -683,8 +681,6 @@ int exmap_unmap_pages( struct vm_area_struct *vma,
 					  struct free_pages *pages)
 {
 	const unsigned long end = addr + (num_pages * PAGE_SIZE);
-	pgd_t *pgd;
-	unsigned long next;
 
 	if (addr < vma->vm_start || end > vma->vm_end)
 		return -EFAULT;

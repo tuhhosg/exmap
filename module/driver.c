@@ -143,7 +143,7 @@ static struct vm_operations_struct pt_export_vm_ops = {
 };
 
 static void ptexport_vma_cleanup(struct exmap_ctx *ctx) {
-	unsigned long rc, unmapped_pages;
+	unsigned long rc;
 	struct vm_area_struct *vma = ctx->ptexport_vma;
 	unsigned pages = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
 	pr_info("ptexport_vma_cleanup!");
@@ -195,7 +195,6 @@ static int pt_export_mmap(struct exmap_ctx *ctx, struct vm_area_struct *vma) {
 static void vm_close(struct vm_area_struct *vma) {
 	struct exmap_ctx *ctx = vma->vm_private_data;
 	unsigned long freed_pages = 0;
-	struct page *page, *npage;
 	int idx;
 
 	if (!ctx->interfaces)
@@ -753,7 +752,6 @@ static long exmap_stats(struct exmap_ioctl_stats *dst, struct exmap_ctx *ctx) {
 	ret.max_interfaces = ctx->max_interfaces;
 	ret.buffer_size = ctx->buffer_size;
 	ret.alloc_count = atomic_read(&ctx->alloc_count);
-out:
 	if( copy_to_user(dst, &ret, sizeof(ret)))
 		return -EFAULT;
 	return 0;
@@ -761,7 +759,9 @@ out:
 
 static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 {
-	struct exmap_ioctl_setup  setup;
+	struct memory_pool_setup pool_setup;
+	struct memory_pool_ctx* pool_ctx;
+	struct exmap_ioctl_setup setup;
 	struct exmap_action_params action;
 	struct exmap_ctx *ctx = exmap_from_file(file);
 	struct exmap_interface *interface;
@@ -877,10 +877,8 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		// 2. Allocate Memory from the system
 		add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size);
 
-		struct memory_pool_setup pool_setup = {
-			.pool_size = ctx->buffer_size,
-		};
-		struct memory_pool_ctx* pool_ctx = memory_pool_create(&pool_setup);
+		pool_setup.pool_size = ctx->buffer_size;
+		pool_ctx = memory_pool_create(&pool_setup);
 		ctx->memory_pool = pool_ctx;
 
 

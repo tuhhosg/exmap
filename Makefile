@@ -11,6 +11,8 @@ modules:
 clean:
 	$(Q)$(MAKE) $(kbuild)
 	$(RM) modules.order
+	make -C module/ clean
+	make -C memory_pool/ clean
 
 # module:
 # 	make -C module/

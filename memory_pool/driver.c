@@ -22,10 +22,12 @@ static inline struct page* get_without_tag(struct page* page) {
 }
 
 static inline struct page* construct_with_tag(struct page* page, unsigned tag) {
+	struct page* clean;
+
 	if (!page)
 		return NULL;
 
-	struct page* clean = get_without_tag(page);
+	clean = get_without_tag(page);
 	return (struct page*) ((uintptr_t) clean | (tag % TAG_LIMIT));
 }
 
@@ -89,33 +91,34 @@ void push_bundle(struct page_bundle bundle, struct memory_pool_ctx* ctx) {
 
 struct page_bundle pop_bundle(struct memory_pool_ctx* ctx) {
 	struct page* page;
+	struct page_bundle ret;
+
 	preempt_disable();
 	page = bundle_list_pop(&ctx->bundle_list);
 	preempt_enable();
 
 	if (!page) {
-		struct page_bundle ret = {
-			.stack = NULL,
-			.count = 0};
+		ret.stack = NULL;
+		ret.count = 0;
 		return ret;
 	}
 
-	struct page_bundle ret = {
-		.stack = page,
-		.count = 512,
-	};
+	ret.stack = page;
+	ret.count = 512;
 	return ret;
 }
 
 
 void push_page(struct page* page, struct page_bundle* bundle, struct memory_pool_ctx* ctx) {
+	void* stack_page_virt;
+
 	BUG_ON(!page);
 
 	if (!bundle->stack) {
 		bundle->stack = page;
 		return;
 	}
-	void* stack_page_virt = page_to_virt(bundle->stack);
+	stack_page_virt = page_to_virt(bundle->stack);
 	((struct page**) stack_page_virt)[bundle->count++] = page;
 
 	if (bundle->count == 512) {
@@ -127,7 +130,6 @@ void push_page(struct page* page, struct page_bundle* bundle, struct memory_pool
 EXPORT_SYMBOL(push_page);
 
 struct page* pop_page(struct page_bundle* bundle, struct memory_pool_ctx* ctx) {
-	int retries = 4;
 	do {
 		if (bundle->count > 0) {
 			void* stack_page_virt = page_to_virt(bundle->stack);
@@ -211,13 +213,14 @@ struct page* alloc_page_system(void) {
 
 
 unsigned free_page_bundle(struct page* bundle_page, unsigned count) {
+	void* stack_page_virt;
 	unsigned freed_pages = 0;
 
 	/* interface-local free pages bundle can temporarily be NULL until the next page gets pushed */
 	if (!bundle_page)
 		return 0;
 
-	void* stack_page_virt = page_to_virt(bundle_page);
+	stack_page_virt = page_to_virt(bundle_page);
 	while (count > 0) {
 		struct page* page = ((struct page**) stack_page_virt)[--count];
 		/* pr_info("bundle: free page %lx, %d remaining, stack %lx (virt %lx)", page, count, stack, stack_page_virt); */
@@ -287,11 +290,12 @@ struct memory_pool_ctx* memory_pool_create(struct memory_pool_setup* setup) {
 EXPORT_SYMBOL(memory_pool_create);
 
 void memory_pool_destroy(struct memory_pool_ctx* ctx) {
+	struct page* node;
 	unsigned long freed_pages = 0;
 
 	freed_pages += free_page_bundle(ctx->pool_bundle.stack, ctx->pool_bundle.count);
 
-	struct page* node = bundle_list_del_all(&ctx->bundle_list);
+	node = bundle_list_del_all(&ctx->bundle_list);
 	while (node) {
 		struct page* stack = node;
 		node = get_without_tag((struct page*) node->mapping);
@@ -300,7 +304,7 @@ void memory_pool_destroy(struct memory_pool_ctx* ctx) {
 
 		/* When this gets triggered, the global list is corrupted */
 		if (node && node == get_without_tag((struct page*) node->mapping)) {
-			pr_err("pool_destroy: circular global list node (%lx) == node->next", node);
+			pr_err("pool_destroy: circular global list node (%lx) == node->next", (unsigned long) node);
 			break;
 		}
 	}
