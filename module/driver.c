@@ -18,7 +18,6 @@
 #include <linux/sched/mm.h>
 #include <linux/cdev.h>
 #include <linux/random.h>
-#include <linux/mmu_notifier.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 #include <linux/io_uring.h>
 #include <linux/io_uring_types.h>
@@ -39,8 +38,6 @@
 #include "exmap_common.h"
 #include "driver.h"
 #include "ksyms.h"
-#include "config.h"
-
 
 static dev_t first;
 static struct cdev cdev;
@@ -51,44 +48,6 @@ static struct class *cl; // Global variable for the device class
 #define EXMAP_FLAGS_STEAL (1 << 2) // Alloc new memory on a page fault
 
 
-#ifdef USE_GLOBAL_FREE_LIST
-struct exmap_llist_head {
-	struct page *first;
-};
-#endif
-
-struct exmap_ctx {
-	struct exmap_ctx *clone_of;
-
-	size_t buffer_size;
-	atomic_t alloc_count;
-
-	/* Only used for accounting purposes */
-	struct user_struct		*user;
-	struct mm_struct		*mm_account;
-
-	/* Here is the main buffer located */
-	struct vm_area_struct *exmap_vma;
-
-	/* Here is the ptexport buffer located */
-	struct vm_area_struct *ptexport_vma;
-
-	/* The baking storage */
-	struct file *file_backend;
-	struct block_device *bdev;
-
-	/* Interfaces are memory mapped areas where the kernel can communicate with the user */
-	atomic_t    flags;
-	int    max_interfaces;
-	struct exmap_interface *interfaces;
-
-#ifdef USE_GLOBAL_FREE_LIST
-	struct exmap_llist_head global_free_list;
-#endif
-
-	struct mmu_notifier mmu_notifier;
-};
-
 static inline
 struct exmap_ctx * exmap_from_file(struct file *file) {
 	struct exmap_ctx *ctx = file->private_data;
@@ -98,186 +57,6 @@ struct exmap_ctx * exmap_from_file(struct file *file) {
 }
 
 ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter);
-
-
-#ifdef USE_GLOBAL_FREE_LIST
-
-#define TAG_BITS 6ULL
-#define TAG_LIMIT (1ULL << (TAG_BITS))
-#define TAG_MASK (TAG_LIMIT - 1)
-
-static inline unsigned get_tag(struct page* page) {
-	return ((uintptr_t) page) & TAG_MASK;
-}
-
-/** @return the correctly aligned pagep with zeroes in the first bits */
-static inline struct page* get_without_tag(struct page* page) {
-	return (struct page*) ((uintptr_t) page & ~TAG_MASK);
-}
-
-static inline struct page* construct_with_tag(struct page* page, unsigned tag) {
-	if (!page)
-		return NULL;
-
-	struct page* clean = get_without_tag(page);
-	return (struct page*) ((uintptr_t) clean | (tag % TAG_LIMIT));
-}
-
-static bool exmap_llist_push(struct page *new_first, struct exmap_llist_head *head)
-{
-	struct page *first;
-
-	/* pages coming in must not have a tag set */
-	BUG_ON(new_first != get_without_tag(new_first));
-
-	do {
-		/* there may be a tag left over from the previous loop iteration */
-		new_first = get_without_tag(new_first);
-
-		/* current first list entry */
-		first = READ_ONCE(head->first);
-		/* the next-pointer of the new first list entry */
-		new_first->mapping = (struct address_space*) get_without_tag(first);
-
-		/* new first entry keeps tag of previous first */
-		new_first = construct_with_tag(new_first, get_tag(first));
-	} while (cmpxchg(&head->first, first, new_first) != first);
-
-	return !first;
-}
-
-static struct page *exmap_llist_pop(struct exmap_llist_head *head)
-{
-	struct page *entry, *old_entry, *next;
-
-	entry = smp_load_acquire(&head->first);
-	for (;;) {
-		if (entry == NULL)
-			return NULL;
-
-		old_entry = entry;
-		next = (struct page*) READ_ONCE(get_without_tag(entry)->mapping);
-		/* next / new first entry has tag of previous first + 1 */
-		next = construct_with_tag(next, get_tag(old_entry) + 1);
-
-		entry = cmpxchg(&head->first, old_entry, next);
-		if (entry == old_entry)
-			break;
-	}
-
-	return get_without_tag(entry);
-}
-
-static inline struct page *exmap_llist_del_all(struct exmap_llist_head *head)
-{
-	return get_without_tag(xchg(&head->first, NULL));
-}
-
-void push_bundle(struct page_bundle bundle, struct exmap_ctx* ctx) {
-	BUG_ON(bundle.count != 512);
-	/* pr_info("push_bundle: add %lx ([0]=%lx, [511]=%lx)", bundle.stack, */
-	/* 		((struct page**) page_to_virt(bundle.stack))[0], */
-	/* 		((struct page**) page_to_virt(bundle.stack))[511] */
-	/* 	); */
-
-	preempt_disable();
-	exmap_llist_push(bundle.stack, &ctx->global_free_list);
-	preempt_enable();
-}
-
-struct page_bundle pop_bundle(struct exmap_ctx* ctx) {
-	struct page* page;
-	preempt_disable();
-	page = exmap_llist_pop(&ctx->global_free_list);
-	preempt_enable();
-
-	if (!page) {
-		struct page_bundle ret = {
-			.stack = NULL,
-			.count = 0};
-		/* pr_info("pop_bundle: global free list empty"); */
-		return ret;
-	}
-
-	struct page_bundle ret = {
-		.stack = page,
-		.count = 512,
-	};
-	/* pr_info("pop_bundle: get %lx ([0]=%lx, [511]=%lx), first was %lx, now %lx", ret.stack, */
-	/* 		((struct page**) page_to_virt(ret.stack))[0], */
-	/* 		((struct page**) page_to_virt(ret.stack))[511], */
-	/* 		page, ctx->global_free_list.first); */
-	return ret;
-}
-
-
-void push_page(struct page* page, struct page_bundle* bundle, struct exmap_ctx* ctx) {
-	/* pr_info("push_page: %lx, bundle %lx, count %lu, global %lx", page, bundle, bundle->count, global_free_list); */
-
-	BUG_ON(!page);
-
-	if (!bundle->stack) {
-		bundle->stack = page;
-		return;
-	}
-	void* stack_page_virt = page_to_virt(bundle->stack);
-	((struct page**) stack_page_virt)[bundle->count++] = page;
-	/* pr_info("set entry %lu of virt %lx: %lx", bundle->count-1, stack_page_virt, page); */
-
-	if (bundle->count == 512) {
-		push_bundle(*bundle, ctx);
-		bundle->count = 0;
-		bundle->stack = NULL;
-	}
-}
-
-struct page* pop_page(struct page_bundle* bundle, struct exmap_ctx* ctx) {
-	int retries = 4;
-	do {
-		// pr_info("pop_page: bundle %lx, stack=%lx, count %lu, global %lx", bundle, bundle->stack, bundle->count, &ctx->global_free_list);
-		if (bundle->count > 0) {
-			void* stack_page_virt = page_to_virt(bundle->stack);
-			struct page* page = ((struct page**) stack_page_virt)[--bundle->count];
-			/* pr_info("get entry %lu of virt %lx: %lx", bundle->count, stack_page_virt, page); */
-			page->mapping = NULL;
-			return page;
-		}
-		if (bundle->stack) {
-			struct page* page = bundle->stack;
-			bundle->stack = NULL;
-			page->mapping = NULL;
-			return page;
-		}
-
-		*bundle = pop_bundle(ctx);
-		if (bundle->count == 0) {
-			/* pr_info("pop_page: new bundle empty, allocating page from system if possible\n"); */
-			if (unlikely(atomic_read(&ctx->alloc_count) < ctx->buffer_size)) {
-				struct page* page = exmap_alloc_page_system();
-				if (page) {
-					atomic_inc(&ctx->alloc_count);
-					return page;
-				}
-			}
-			if (retries-- == 0)
-				goto failed;
-		}
-	} while (1);
-
-failed:
-#if 0
-	pr_warn("exmap_alloc: no page, alloc=%d, alloc_max=%lu\n",
-			atomic_read(&ctx->alloc_count), ctx->buffer_size);
-	for (int i = 0; i < ctx->max_interfaces; i++) {
-		struct exmap_interface* iface = &ctx->interfaces[i];
-		pr_info("interface %d: %lu pages in bundle page %lx\n", i,
-				iface->local_pages.count, iface->local_pages.stack);
-	}
-#endif
-	return NULL;
-}
-
-#endif	/* USE_GLOBAL_FREE_LIST */
 
 
 
@@ -314,266 +93,6 @@ static inline int exmap_account_mem(struct exmap_ctx *ctx,
 	return 0;
 }
 
-void exmap_free_page_system(struct page * page) {
-//	current->rss_stat.count[mm_counter_file(page)] -= 1;
-	ClearPageReserved(page);
-	__free_pages(page, 0);
-}
-
-struct page* exmap_alloc_page_system(void) {
-	struct page *page = alloc_pages(GFP_NOIO | __GFP_ZERO,  0);
-	SetPageReserved(page);
-//	current->rss_stat.count[mm_counter_file(page)] += 1;
-	return page;
-}
-
-#ifndef USE_GLOBAL_FREE_LIST
-static unsigned int
-choose_and_lock_steal_interface(struct exmap_ctx *ctx,
-									struct exmap_interface *interface,
-									unsigned desired_count) {
-	int i;
-	unsigned int steal_id      = interface->steal_target;
-	struct exmap_interface *steal_it = &ctx->interfaces[steal_id];
-	unsigned steal_free_pages = steal_it->free_pages.count;
-	unsigned int random[2] = {0, 0};
-
-	// 1. We try to steal from our last interface
-	if (steal_free_pages > desired_count) {
-		if (spin_trylock(&steal_it->free_pages.lock) != 0)
-			return steal_id;
-	}
-
-	// 2. Choose 2 interfaces by random
-	get_random_bytes(&random, sizeof(random));
-
-	/* try the default steal target first */
-	for (i = 0; i < ARRAY_SIZE(random); i++) {
-		unsigned int cand_id = random[i] % ctx->max_interfaces;
-		struct exmap_interface *cand_it = &ctx->interfaces[cand_id];
-		unsigned int cand_free_pages = ctx->interfaces[cand_id].free_pages.count;
-
-		if (cand_free_pages > desired_count)
-			if (spin_trylock(&cand_it->free_pages.lock) != 0)
-				return cand_id;
-
-		if (cand_free_pages >= steal_free_pages) {
-			steal_id = cand_id;
-			steal_it = cand_it;
-			steal_free_pages = cand_free_pages;
-		}
-	}
-
-	spin_lock(&steal_it->free_pages.lock);
-
-	return steal_id;
-}
-
-static unsigned
-free_pages_move(struct free_pages *src, struct free_pages *dst,
-				unsigned max_pages) {
-	struct list_head *list_ptr;
-	int               src_count = src->count;
-	LIST_HEAD(temp);
-
-	if (src_count == 0)
-		return 0;
-
-	if (src_count <= max_pages) {
-		// Move all items from src to dst
-		list_splice_init(&src->list, &dst->list);
-		dst->count += src_count;
-		src->count = 0;
-		return src_count;
-	}
-
-	// We steal only a "few" oages
-
-	list_ptr  = &src->list;
-	for (src_count = 0; src_count < max_pages; src_count++) {
-		list_ptr = list_ptr->next;
-	}
-
-	/* remove <steal_count> elements from the victim and add them to the robber's list */
-	list_cut_position(&temp, &src->list, list_ptr);
-	list_splice(&temp, &dst->list);
-
-	src->count -= src_count;
-	dst->count += src_count;
-
-	return src_count;
-}
-
-
-static int
-steal_pages(struct exmap_ctx *ctx,  struct exmap_interface *interface,
-			struct free_pages *dst, unsigned long desired_count) {
-	unsigned int steal_id, first_steal_id;
-	struct exmap_interface *steal_from;
-	unsigned long this_steal_count, steal_count = 0;
-
-
-	/* search for an interface with successful trylock first, enough pages second */
-	first_steal_id = choose_and_lock_steal_interface(ctx, interface, desired_count);
-	steal_id   = first_steal_id;
-	steal_from = &ctx->interfaces[steal_id];
-
-again: // steal_from->free_pages must be locked.
-	// Steal at least half, but not more than what the other has.
-	// FIXME: We need a better strategy how much to steal.
-	this_steal_count = max(desired_count,    steal_from->free_pages.count / 2);
-	this_steal_count = max(desired_count,    512ul);
-	this_steal_count = min(this_steal_count, steal_from->free_pages.count);
-
-	if (this_steal_count > 0) {
-		interface->steal_target = steal_id;
-
-		//pr_info("Steal: %lu -> %lu/%lu => %lu/%lu\n", desired_count, this_steal_count,
-		//		steal_from->free_pages.count,
-		//		steal_count + this_steal_count, desired_count);
-
-		steal_count += free_pages_move(&steal_from->free_pages, dst, this_steal_count);
-		steal_from->count.s++;
-		steal_from->count.p += this_steal_count;
-	}
-
-	spin_unlock(&steal_from->free_pages.lock);
-
-	if (steal_count < desired_count) {
-		do {
-			steal_id = (steal_id + 1) % ctx->max_interfaces;
-			steal_from = &ctx->interfaces[steal_id];
-
-			if (steal_from->free_pages.count > 10) {
-				spin_lock(&steal_from->free_pages.lock);
-				goto again;
-			}
-		} while(steal_id != first_steal_id);
-
-		// pr_info("Steal failed finaly: %lu/%lu", steal_count, desired_count);
-		return -ENOMEM;
-	}
-
-	// pr_info("StolenA[%p]: %lu\n", interface, steal_count);
-	return steal_count;
-}
-
-
-
-static int
-exmap_alloc_pages(struct exmap_ctx *ctx,
-				  struct exmap_interface *interface,
-				  struct free_pages *pages,
-				  int min_pages) {
-	int steal_count;
-#ifdef USE_SYSTEM_ALLOC
-#ifdef USE_BULK_SYSTEM_ALLOC
-	unsigned long ret = alloc_pages_bulk_list(GFP_NOIO | __GFP_ZERO, min_pages, &pages->list);
-	/* pr_info("alloc bulk list returned %lu", ret); */
-	if (ret != min_pages)
-		return -ENOMEM;
-	pages->count += ret;
-	return 0;
-#else
-	int i;
-	for (i = 0; i < min_pages; i++) {
-		struct page* page = exmap_alloc_page_system();
-		list_add_tail(&page->lru, &pages->list);
-	}
-	pages->count += min_pages;
-	return 0;
-#endif
-#endif	/* USE_SYSTEM_ALLOC */
-
-	// 1. Try interface-local free list. For this we move at most
-	// min_pages into our output list (pages). Thereby, that list
-	// might be half full afterwards.
-	if (interface->free_pages.count > 0) {
-		spin_lock(&interface->free_pages.lock);
-		steal_count  = free_pages_move(&interface->free_pages, pages, min_pages);
-		// pr_info("local: %d/%d", min_pages, interface->free_pages.count);
-		min_pages   -= steal_count;
-		spin_unlock(&interface->free_pages.lock);
-	}
-
-	if (min_pages == 0)
-		return 0;
-
-	// 2. As long as our memory limit (setup.buffer_size) isn't reached,
-	// we can get a page from the system allocator.
-	while (unlikely(atomic_read(&ctx->alloc_count) < ctx->buffer_size)
-		   && min_pages > 0) {
-		struct page *page = exmap_alloc_page_system();
-		list_add(&page->lru, &pages->list);
-		atomic_inc(&ctx->alloc_count);
-		pages->count++;
-		min_pages --;
-	}
-
-	if (min_pages == 0)
-		return 0;
-
-   
-	// 2. We start to steal pages from other interfaces.
-	steal_count = steal_pages(ctx, interface, pages, min_pages);
-	// pr_info("StolenB[%p]: %d\n", interface, steal_count);
-	if (steal_count < 0)
-		return -ENOMEM;
-
-	min_pages -= steal_count;
-	if (min_pages <= 0)
-		return 0;
-
-	return -ENOMEM;
-}
-
-void exmap_free_pages(struct exmap_ctx *ctx,
-					  struct exmap_interface* interface,
-					  struct free_pages *pages) {
-
-/* #if 0 */
-#ifdef USE_SYSTEM_ALLOC
-	struct page * page, *npage;
-	list_for_each_entry_safe(page, npage, &pages->list, lru) {
-		exmap_free_page_system(page);
-	}
-	return;
-#endif
-
-	spin_lock(&interface->free_pages.lock);
-	list_splice(&pages->list, &interface->free_pages.list);
-	interface->free_pages.count += pages->count;
-	pages->count = 0;
-	spin_unlock(&interface->free_pages.lock);
-	return;
-}
-#endif	/* USE_GLOBAL_FREE_LIST */
-
-#ifdef USE_GLOBAL_FREE_LIST
-unsigned exmap_free_stack(struct page* stack, unsigned count) {
-	unsigned freed_pages = 0;
-
-	/* interface-local free pages stack can temporarily be NULL until the next page gets pushed */
-	if (!stack)
-		return 0;
-
-	void* stack_page_virt = page_to_virt(stack);
-	while (count > 0) {
-		struct page* page = ((struct page**) stack_page_virt)[--count];
-		/* pr_info("bundle: free page %lx, %d remaining, stack %lx (virt %lx)", page, count, stack, stack_page_virt); */
-		BUG_ON(!page);
-		page->mapping = NULL;
-		exmap_free_page_system(page);
-		freed_pages++;
-	}
-	/* pr_info("bundle: free stack page %lx itself", stack); */
-	stack->mapping = NULL;
-	exmap_free_page_system(stack);
-	freed_pages++;
-
-	return freed_pages;
-}
-#endif
 
 ////////////////////////////////////////////////////////////////
 // Page Table Export
@@ -603,15 +122,12 @@ static vm_fault_t pt_export_vm_fault(struct vm_fault *vmf) {
 		//pte_t *ptexport_pte = pte_offset_map(ptexport_pmd, vmf->address);
 
 		// This is an uggly hack to insert the page without validation
-#ifdef USE_GLOBAL_FREE_LIST
 		struct page_bundle temp = {
 			.stack = ptable,
 			.count = 0,
 		};
+		free_pages.ctx = ctx;
 		free_pages.bundle = &temp;
-#else
-		list_add(&ptable->lru, &free_pages.list);
-#endif
 		free_pages.count++;
 		rc = exmap_insert_pages(vma, vmf->address, 1, &free_pages, NULL,NULL);
 		BUG_ON(rc != 0);
@@ -627,7 +143,7 @@ static struct vm_operations_struct pt_export_vm_ops = {
 };
 
 static void ptexport_vma_cleanup(struct exmap_ctx *ctx) {
-	unsigned long rc, unmapped_pages;
+	unsigned long rc;
 	struct vm_area_struct *vma = ctx->ptexport_vma;
 	unsigned pages = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
 	pr_info("ptexport_vma_cleanup!");
@@ -679,7 +195,6 @@ static int pt_export_mmap(struct exmap_ctx *ctx, struct vm_area_struct *vma) {
 static void vm_close(struct vm_area_struct *vma) {
 	struct exmap_ctx *ctx = vma->vm_private_data;
 	unsigned long freed_pages = 0;
-	struct page *page, *npage;
 	int idx;
 
 	if (!ctx->interfaces)
@@ -688,34 +203,10 @@ static void vm_close(struct vm_area_struct *vma) {
 	// Free all pages in our interfaces
 	for (idx = 0; idx < ctx->max_interfaces; idx++) {
 		struct exmap_interface *interface = &ctx->interfaces[idx];
-#ifdef USE_GLOBAL_FREE_LIST
-		freed_pages += exmap_free_stack(interface->local_pages.stack, interface->local_pages.count);
-#else
-		list_for_each_entry_safe(page, npage, &interface->free_pages.list, lru) {
-			exmap_free_page_system(page);
-			freed_pages ++;
-		}
-#endif
+		freed_pages += free_page_bundle(interface->local_pages.stack, interface->local_pages.count);
 	}
 
-#ifdef USE_GLOBAL_FREE_LIST
-	/* free remaining global list entries */
-	pr_info("vm_close: free global list entries (%lu from interfaces)\n", freed_pages);
-
-	struct page* node = exmap_llist_del_all(&ctx->global_free_list);
-	while (node) {
-		struct page* stack = node;
-		node = get_without_tag((struct page*) node->mapping);
-
-		freed_pages += exmap_free_stack(stack, 512);
-
-		/* When this gets triggered, the global list is corrupted */
-		if (node && node == get_without_tag((struct page*) node->mapping)) {
-			pr_err("vm_close: circular global list node (%lx) == node->next", node);
-			break;
-		}
-	}
-#endif
+	memory_pool_destroy(ctx->memory_pool);
 
 	add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * ctx->buffer_size);
 
@@ -742,18 +233,9 @@ static vm_fault_t exmap_vm_fault(struct vm_fault *vmf) {
 		interface = &ctx->interfaces[cpu];
 		// mutex_lock(&interface->interface_lock);
 
-#ifdef USE_GLOBAL_FREE_LIST
 		free_pages.ctx = ctx;
 		free_pages.bundle = &interface->local_pages;
 		free_pages.count = 1;
-#else
-		rc = exmap_alloc_pages(ctx, interface, &free_pages,
-							   1);
-		if (rc < 0) {
-			pr_info("alloc failed: %d\n", rc);
-			goto out;
-		}
-#endif
 
 		rc = exmap_insert_pages(vma, (uintptr_t) vmf->address,
 								1, &free_pages, NULL,NULL);
@@ -762,9 +244,6 @@ static vm_fault_t exmap_vm_fault(struct vm_fault *vmf) {
 			goto out;
 		}
 
-#ifndef USE_GLOBAL_FREE_LIST
-		exmap_free_pages(ctx, interface, &free_pages);
-#endif
 
 		// pr_info("fault ok: %d\n", cpu);
 
@@ -817,20 +296,15 @@ static void exmap_vma_cleanup(struct exmap_ctx *ctx, unsigned long start, unsign
 		mutex_lock(&ctx->interfaces[idx].interface_lock);
 	}
 
-#ifdef USE_GLOBAL_FREE_LIST
 	free_pages.ctx = ctx;
 	free_pages.bundle = &ctx->interfaces[0].local_pages;
 	free_pages.count = 0;
-#endif
+
     rc = exmap_unmap_pages(vma, vma->vm_start, pages, &free_pages);
     BUG_ON(rc != 0);
 
     unmapped_pages = free_pages.count;
 
-#ifndef USE_GLOBAL_FREE_LIST
-    // Give Memory that is still mapped to the first interface
-    exmap_free_pages(ctx, &ctx->interfaces[0], &free_pages);
-#endif
 
     printk("notifier cleanup: purged %lu pages\n", unmapped_pages);
 
@@ -1139,20 +613,9 @@ exmap_alloc_from_ivec(struct exmap_ctx *ctx, struct exmap_interface* interface,
 	if (ivec_len == 0)
 		return failed;
 
-#ifdef USE_GLOBAL_FREE_LIST
 	free_pages.ctx = ctx;
 	free_pages.bundle = &interface->local_pages;
 	free_pages.count = 0;
-#else
-	// Pre-fill our pages store with as many pages as there are
-	// IO-Vectors, assuming that each vector uses at least one page
-	rc = exmap_alloc_pages(ctx, interface, &free_pages,
-						   ivec_len);
-	if (rc) {
-		//pr_info("First Alloc failed: %d\n", rc);
-		return rc;
-	}
-#endif
 
 	// pr_info("First Alloc: %d\n", free_pages.count);
 
@@ -1170,22 +633,8 @@ exmap_alloc_from_ivec(struct exmap_ctx *ctx, struct exmap_interface* interface,
 
 		// pr_info("alloc[%d]: off=%llu, len=%d", iface, (uint64_t) vec.page, (int) vec.len);
 
-#ifdef USE_GLOBAL_FREE_LIST
 		/* assume there are enough free pages in the local or global list */
 		free_pages.count += vec.len;
-#else
-		// Allocate more memory for ALLOC
-		if (free_pages.count < vec.len) {
-				rc = exmap_alloc_pages(ctx, interface, &free_pages,
-									   vec.len - free_pages.count);
-			if (rc) {
-				failed++;
-				failed = rc;
-				break;
-			}
-		}
-		BUG_ON(free_pages.count < vec.len);
-#endif
 
 		free_pages_before = free_pages.count;
 		rc = exmap_insert_pages(vma, uaddr, vec.len, &free_pages,
@@ -1211,11 +660,6 @@ exmap_alloc_from_ivec(struct exmap_ctx *ctx, struct exmap_interface* interface,
 
 		WRITE_ONCE(ivec[idx], ret);
 	}
-#ifndef USE_GLOBAL_FREE_LIST
-	// free remaining pages into the local interface
-	// pr_info("Free %d (nr_pages_alloced %lu)\n", free_pages.count, nr_pages_alloced);
-	exmap_free_pages(ctx, interface, &free_pages);
-#endif
 
 	if (alloc_ctx.bio_count > 0)
 		exmap_submit_and_wait(&alloc_ctx);
@@ -1252,11 +696,9 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 	// Do we really need this lock?
 	mmap_read_lock(vma->vm_mm);
 
-#ifdef USE_GLOBAL_FREE_LIST
 	free_pages.ctx = ctx;
 	free_pages.bundle = &interface->local_pages;
 	free_pages.count = 0;
-#endif
 
 	for (idx = 0; idx < iov_len; idx++) {
 		struct exmap_iov vec = READ_ONCE(interface->usermem->iov[idx]);
@@ -1281,23 +723,15 @@ exmap_free(struct exmap_ctx *ctx, struct exmap_action_params *params) {
 
 		WRITE_ONCE(interface->usermem->iov[idx], vec);
 
-#ifndef BATCH_TLB_FLUSH
-		flush_tlb_mm(vma->vm_mm);
-#endif
 	}
 
 	// Flush the TLB of this CPU!
 	// __flush_tlb_all(); 	// Please note: This is no shootdown!
-#ifdef BATCH_TLB_FLUSH
 	flush_tlb_mm(vma->vm_mm);
-#endif
 
 	// Update the RSS counter once!
 	// add_mm_counter(vma->vm_mm, MM_FILEPAGES, -1 * free_pages.count);
 
-#ifndef USE_GLOBAL_FREE_LIST
-	exmap_free_pages(ctx, interface, &free_pages);
-#endif
 
 	mmap_read_unlock(vma->vm_mm);
 
@@ -1318,7 +752,6 @@ static long exmap_stats(struct exmap_ioctl_stats *dst, struct exmap_ctx *ctx) {
 	ret.max_interfaces = ctx->max_interfaces;
 	ret.buffer_size = ctx->buffer_size;
 	ret.alloc_count = atomic_read(&ctx->alloc_count);
-out:
 	if( copy_to_user(dst, &ret, sizeof(ret)))
 		return -EFAULT;
 	return 0;
@@ -1326,7 +759,9 @@ out:
 
 static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 {
-	struct exmap_ioctl_setup  setup;
+	struct memory_pool_setup pool_setup;
+	struct memory_pool_ctx* pool_ctx;
+	struct exmap_ioctl_setup setup;
 	struct exmap_action_params action;
 	struct exmap_ctx *ctx = exmap_from_file(file);
 	struct exmap_interface *interface;
@@ -1415,9 +850,6 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 			return -ENOMEM;
 		}
 
-#ifdef USE_GLOBAL_FREE_LIST
-		ctx->global_free_list.first = NULL;
-#endif
 
 		for (idx = 0; idx < ctx->max_interfaces; idx++) {
 			interface = &ctx->interfaces[idx];
@@ -1438,51 +870,22 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 
 			mutex_init(&interface->interface_lock);
 
-#ifdef USE_GLOBAL_FREE_LIST
 			interface->local_pages.count = 0;
 			interface->local_pages.stack = NULL;
-#else
-			/* set default page steal target to a value chosen by fair dice roll */
-			interface->count.s = 0;
-			interface->count.p = 0;
-			interface->steal_target = (idx + 4) % ctx->max_interfaces;
-			free_pages_init(&interface->free_pages);
-#endif
 		}
 
 		// 2. Allocate Memory from the system
 		add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size);
 
-#ifdef PRE_ALLOC
-		while (atomic_read(&ctx->alloc_count) < ctx->buffer_size) {
-			struct page* page = exmap_alloc_page_system();
-			if (!page) {
-				pr_err("pre alloc failed at count %d of %lu\n",
-					   atomic_read(&ctx->alloc_count), ctx->buffer_size);
-				break;
-			}
+		pool_setup.pool_size = ctx->buffer_size;
+		pool_ctx = memory_pool_create(&pool_setup);
+		ctx->memory_pool = pool_ctx;
 
-			unsigned iface = atomic_read(&ctx->alloc_count) * ctx->max_interfaces / ctx->buffer_size;
-			/* pr_info("pre alloc, iface %u at count %d of %lu\n", iface, */
-			/* 	   atomic_read(&ctx->alloc_count), ctx->buffer_size); */
-#ifdef USE_GLOBAL_FREE_LIST
-			push_page(page, &ctx->interfaces[iface].local_pages, ctx);
-#else
-			list_add(&page->lru, &ctx->interfaces[iface].free_pages.list);
-			ctx->interfaces[iface].free_pages.count++;
-#endif
-			atomic_inc(&ctx->alloc_count);
-		}
-#endif
 
 		exmap_flags = EXMAP_FLAGS_ACTIVE;
-#ifdef USE_GLOBAL_FREE_LIST
 		// The pagefault handler is currently broken in global free mode
 		if (setup.flags & EXMAP_PAGEFAULT_ALLOC)
 			return -EINVAL;
-#else 
-		exmap_flags |= EXMAP_FLAGS_STEAL;
-#endif
 		if (setup.flags & EXMAP_PAGEFAULT_ALLOC)
 			exmap_flags |= EXMAP_FLAGS_PAGEFAULT_ALLOC;
 		atomic_set(&ctx->flags, exmap_flags);
@@ -1616,20 +1019,10 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 
 	total_nr_pages = iov_iter_count(iter) >> PAGE_SHIFT;
 
-#ifdef USE_GLOBAL_FREE_LIST
 	free_pages.ctx = ctx;
 	free_pages.bundle = &interface->local_pages;
 	/* assume we have enough free pages somewhere */
 	free_pages.count = total_nr_pages;
-#else
-	rc_all = exmap_alloc_pages(ctx, interface, &free_pages,
-						   total_nr_pages);
-	if (rc_all != 0) {
-		pr_info("exmap[%d] alloc_pages failed: %ld\n", (u16)(interface - ctx->interfaces),
-				total_nr_pages);
-		goto out;
-	}
-#endif
 	while (iov_iter_count(iter)) {
 		char __user *addr; ssize_t size;
 		loff_t  disk_offset;
@@ -1700,11 +1093,6 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 	}
 
 out:
-#ifndef USE_GLOBAL_FREE_LIST
-	if (free_pages.count > 0) { // Free the leftover pages
-		exmap_free_pages(ctx, interface, &free_pages);
-	}
-#endif
 
 	// Restore kiocb (FIXME: This was necessary at some point, but it provokes weirdest bugs)
 	// kiocb->ki_filp = file;

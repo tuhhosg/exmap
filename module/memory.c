@@ -6,7 +6,6 @@
 #include <linux/memcontrol.h>
 
 #include "driver.h"
-#include "config.h"
 
 struct exmap_interface;
 
@@ -391,28 +390,17 @@ more:
 		int pte_idx = 0;
 		const int batch_size = pages_to_write_in_pmd; // min_t(int, pages_to_write_in_pmd, 8);
 
-#ifdef USE_FASTPATH
 		// Fastpath for single page in this PMD
 		if (pages_to_write_in_pmd == 1) {
-#ifdef USE_GLOBAL_FREE_LIST
-			struct page* page = pop_page(free_pages->bundle, free_pages->ctx);
+			struct page* page = pop_page(free_pages->bundle, free_pages->ctx->memory_pool);
 			if (!page)
 				return -ENOMEM;
-#else
-			struct page *page = list_first_entry_or_null(&free_pages->list, struct page, lru);
-			BUG_ON(!page);
-			list_del(&page->lru);
-#endif
 
 			pte = pte_offset_map(pmd, addr);
 			err = insert_page_fastpath(pte, addr, page, prot);
 
 			if (unlikely(err)) { // Insert failed, somebody else was faster
-#ifdef USE_GLOBAL_FREE_LIST
-				push_page(page, free_pages->bundle, free_pages->ctx);
-#else
-				list_add(&page->lru, &free_pages->list);
-#endif
+				push_page(page, free_pages->bundle, free_pages->ctx->memory_pool);
 			} else { // We actually used the page
 				BUG_ON(free_pages->count == 0);
 				free_pages->count --;
@@ -422,18 +410,12 @@ more:
 			remaining_pages_total -= 1;
 			break;
 		}
-#endif
 
 		start_pte = pte_offset_map_lock(mm, pmd, addr, &pte_lock);
 		for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {
-#ifdef USE_GLOBAL_FREE_LIST
-			struct page* page = pop_page(free_pages->bundle, free_pages->ctx);
+			struct page* page = pop_page(free_pages->bundle, free_pages->ctx->memory_pool);
 			if (!page)
 				return -ENOMEM;
-#else
-			struct page *page = list_first_entry_or_null(&free_pages->list, struct page, lru);
-			BUG_ON(!page);
-#endif
 
 			// unsigned long pfn = page_to_pfn(page);
 			// pr_info("alloc: addr: %p %p 0x%lx, %p", cb, alloc_ctx, addr - vma->vm_start, page);
@@ -453,9 +435,6 @@ more:
 			} else {
 				// We actually used the page
 				BUG_ON(free_pages->count == 0);
-#ifndef USE_GLOBAL_FREE_LIST
-				list_del(&page->lru);
-#endif
 				free_pages->count --;
 
 				// This might issue a read request
@@ -535,8 +514,6 @@ void pmd_clear_bad(pmd_t *pmd)
 
 static struct page*
 unmap_page_fastpath(pte_t *pte) {
-	int err;
-	struct page* page;
 	pte_t ptent, new_ptent;
 
 	ptent = ptep_get(pte);
@@ -635,7 +612,6 @@ more:
 		int pte_idx = 0;
 		const int batch_size = pages_to_write_in_pmd; //min_t(int, pages_to_write_in_pmd, 8);
 
-#ifdef USE_FASTPATH
 		if (pages_to_write_in_pmd == 1) {
 			struct page *page;
 
@@ -643,11 +619,7 @@ more:
 			page = unmap_page_fastpath(pte);
 
 			if (page && free_pages) {
-#ifdef USE_GLOBAL_FREE_LIST
-			    push_page(page, free_pages->bundle, free_pages->ctx);
-#else
-				list_add(&page->lru, &free_pages->list);
-#endif
+				push_page(page, free_pages->bundle, free_pages->ctx->memory_pool);
 				free_pages->count ++;
 			}
 
@@ -655,7 +627,6 @@ more:
 			addr += PAGE_SIZE;
 			break;
 		}
-#endif
 
 		start_pte = pte_offset_map_lock(mm, pmd, addr, &pte_lock);
 		for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {
@@ -677,11 +648,7 @@ more:
 				BUG_ON(!page);
 
 				if (free_pages) {
-#ifdef USE_GLOBAL_FREE_LIST
-					push_page(page, free_pages->bundle, free_pages->ctx);
-#else
-					list_add(&page->lru, &free_pages->list);
-#endif
+					push_page(page, free_pages->bundle, free_pages->ctx->memory_pool);
 					free_pages->count ++;
 				}
 
@@ -714,8 +681,6 @@ int exmap_unmap_pages( struct vm_area_struct *vma,
 					  struct free_pages *pages)
 {
 	const unsigned long end = addr + (num_pages * PAGE_SIZE);
-	pgd_t *pgd;
-	unsigned long next;
 
 	if (addr < vma->vm_start || end > vma->vm_end)
 		return -EFAULT;
