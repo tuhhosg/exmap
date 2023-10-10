@@ -59,7 +59,9 @@ int main() {
     int fd = open("/dev/exmap", O_RDWR);
     if (fd < 0) die("open");
 
-	const size_t MAP_SIZE = thread_count * 8 * 1024 * 1024;
+	const size_t MEMORY_POOL_SIZE = (1024 * 1024 * 1024) >> 12;
+	const size_t SPREAD = 10;
+	const size_t MAP_SIZE = MEMORY_POOL_SIZE * SPREAD * PAGE_SIZE;
 	char *map = (char*) mmap(NULL, MAP_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
 	if (map == MAP_FAILED) die("mmap");
 
@@ -73,7 +75,8 @@ int main() {
 	struct exmap_ioctl_setup buffer;
 	buffer.fd             = -1; // Not baked by a file
 	buffer.max_interfaces = thread_count;
-	buffer.buffer_size    = thread_count * 2 * 512;
+	buffer.buffer_size    = MEMORY_POOL_SIZE;
+	buffer.flags          = 0;
 	if (ioctl(fd, EXMAP_IOCTL_SETUP, &buffer) < 0) {
 		perror("ioctl: exmap_setup");
 		return 0;

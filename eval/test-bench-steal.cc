@@ -117,6 +117,7 @@ int main() {
 	buffer.fd             = -1; // Not baked by a file
 	buffer.max_interfaces = thread_count;
 	buffer.buffer_size    = MEMORY_POOL_SIZE;
+	buffer.flags          = 0;
 	if (ioctl(fd, EXMAP_IOCTL_SETUP, &buffer) < 0) {
 		perror("ioctl: exmap_setup");
 		return -1;
