@@ -6,8 +6,8 @@
 #include <linux/memcontrol.h>
 
 #include "driver.h"
-#include "config.h"
 
+struct exmap_interface;
 
 /**
  * exmap_pte_alloc_one - allocate a page for PTE-level user page table
@@ -198,6 +198,16 @@ int exmap_default_pmd_alloc(struct mm_struct *mm, pud_t *pud, unsigned long addr
 	return 0;
 }
 
+/*
+ * pmd_huge() returns 1 if @pmd is hugetlb related entry, that is normal
+ * hugetlb entry or non-present (migration or hwpoisoned) hugetlb entry.
+ * Otherwise, returns 0.
+ */
+int pmd_huge(pmd_t pmd)
+{
+	return !pmd_none(pmd) &&
+		(pmd_val(pmd) & (_PAGE_PRESENT|_PAGE_PSE)) != _PAGE_PRESENT;
+}
 
 
 static inline
@@ -266,6 +276,15 @@ static pmd_t *walk_to_pmd(struct mm_struct *mm, unsigned long addr)
 	return pmd;
 }
 
+pmd_t * exmap_walk_to_pmd(struct vm_area_struct *vma, unsigned long addr) {
+	/* Allocate the PTE if necessary; takes PMD lock once only. */
+	pmd_t * pmd = walk_to_pmd(vma->vm_mm, addr);
+	// Allocate an page table if necessary. This can fail if somebody else does this in parallel.
+	if (pmd)
+		(void) exmap_pte_alloc(vma->vm_mm, pmd);
+	return pmd;
+}
+
 // For add_mm_counter to work inside a module
 void mm_trace_rss_stat(struct mm_struct *mm, int member, long count)
 {
@@ -274,9 +293,6 @@ void mm_trace_rss_stat(struct mm_struct *mm, int member, long count)
 static int insert_page_into_pte_locked(struct mm_struct *mm, pte_t *pte,
 									   unsigned long addr, struct page *page, pgprot_t prot)
 {
-#ifdef MAPCOUNT
-	unsigned int mapcount;
-#endif
 	/* pr_info("pte_none = %d, page dirty = %d, pte = %p, page = %p", !(pte->pte & ~(_PAGE_DIRTY | _PAGE_ACCESSED)), PageDirty(page), pte, page); */
 	/* NOTE this causes EBUSY in insert_pages */
 	if (!pte_none(*pte))
@@ -284,11 +300,6 @@ static int insert_page_into_pte_locked(struct mm_struct *mm, pte_t *pte,
 	/* Ok, finally just insert the thing.. */
 
 	// add_mm_counter_fast(mm, mm_counter_file(page), 1);
-
-#ifdef MAPCOUNT
-	mapcount = atomic_inc_and_test(&page->_mapcount);
-	BUG_ON(mapcount != 1);
-#endif
 
 	set_pte_at(mm, addr, pte, mk_pte(page, prot));
 	return 0;
@@ -319,12 +330,9 @@ static int insert_page_in_batch_locked(struct mm_struct *mm, pte_t *pte,
 
 
 static int insert_page_fastpath(pte_t *pte, unsigned long addr, struct page *page, pgprot_t prot) {
-	int err;
+	int err = 0;
 	pte_t ptent, new_ptent;
-	err = validate_page_before_insert(page);
-	if (err)
-		return err;
-
+	
 	ptent = ptep_get(pte);
 	if (pte_present(ptent))
 		return -EBUSY;
@@ -332,10 +340,13 @@ static int insert_page_fastpath(pte_t *pte, unsigned long addr, struct page *pag
 	// We compare and exchange once.
 	new_ptent = mk_pte(page, prot);
 
-	if (atomic_long_cmpxchg((atomic_long_t*) &(pte->pte), ptent.pte, new_ptent.pte) != ptent.pte)
+	if (unlikely(atomic_long_cmpxchg((atomic_long_t*) &(pte->pte),
+									 ptent.pte,
+									 new_ptent.pte) != ptent.pte)) {
 		err = -EBUSY;
+	}
 
-	return 0;
+	return err;
 }
 
 /* insert_pages() amortizes the cost of spinlock operations
@@ -371,19 +382,19 @@ more:
 		int pte_idx = 0;
 		const int batch_size = pages_to_write_in_pmd; // min_t(int, pages_to_write_in_pmd, 8);
 
-#ifdef USE_FASTPATH
 		// Fastpath for single page in this PMD
 		if (pages_to_write_in_pmd == 1) {
-			struct page *page = list_first_entry_or_null(&free_pages->list, struct page, lru);
-			BUG_ON(!page);
+			struct page* page = pop_page(free_pages->bundle, free_pages->ctx->memory_pool);
+			if (!page)
+				return -ENOMEM;
 
 			pte = pte_offset_map(pmd, addr);
 			err = insert_page_fastpath(pte, addr, page, prot);
 
-			if (!err) {
-				// We actually used the page
+			if (unlikely(err)) { // Insert failed, somebody else was faster
+				push_page(page, free_pages->bundle, free_pages->ctx->memory_pool);
+			} else { // We actually used the page
 				BUG_ON(free_pages->count == 0);
-				list_del(&page->lru);
 				free_pages->count --;
 			}
 
@@ -391,12 +402,12 @@ more:
 			remaining_pages_total -= 1;
 			break;
 		}
-#endif
 
 		start_pte = pte_offset_map_lock(mm, pmd, addr, &pte_lock);
 		for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {
-			struct page *page = list_first_entry_or_null(&free_pages->list, struct page, lru);
-			BUG_ON(!page);
+			struct page* page = pop_page(free_pages->bundle, free_pages->ctx->memory_pool);
+			if (!page)
+				return -ENOMEM;
 
 			// unsigned long pfn = page_to_pfn(page);
 			// pr_info("alloc: addr: %p %p 0x%lx, %p", cb, alloc_ctx, addr - vma->vm_start, page);
@@ -416,7 +427,6 @@ more:
 			} else {
 				// We actually used the page
 				BUG_ON(free_pages->count == 0);
-				list_del(&page->lru);
 				free_pages->count --;
 
 				// This might issue a read request
@@ -441,7 +451,7 @@ int exmap_insert_pages(struct vm_area_struct *vma, unsigned long addr,
 					   unsigned long num_pages, struct free_pages *pages,
 					   exmap_insert_callback cb, struct exmap_alloc_ctx *data)
 {
-	const unsigned long end_addr = addr + (pages->count * PAGE_SIZE) - 1;
+	const unsigned long end_addr = addr + (num_pages * PAGE_SIZE) - 1;
 
 	if (addr < vma->vm_start || end_addr >= vma->vm_end)
 		return -EFAULT;
@@ -494,149 +504,8 @@ void pmd_clear_bad(pmd_t *pmd)
 	pmd_clear(pmd);
 }
 
-static inline unsigned long
-exmap_zap_pte_range(struct vm_area_struct *vma, pmd_t *pmd,
-					unsigned long addr, unsigned long end,
-					struct free_pages *pages)
-{
-	struct mm_struct *const mm = vma->vm_mm;
-	spinlock_t *ptl;
-	pte_t *start_pte;
-	pte_t *pte;
-	unsigned long freed_pages = 0;
-
-
-	// pr_info("PTE zap: 0x%lx-%lx %lx", addr, end, end - addr);
-
-	start_pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
-	pte = start_pte;
-	// pte = pte_offset_map(pmd, addr);
-	do {
-		pte_t ptent = ptep_get_and_clear(mm, addr, pte);
-		if (pte_none(ptent))
-			continue;
-
-		if (pte_present(ptent)) {
-			unsigned long pfn = pte_pfn(ptent);
-			struct page *page = pfn_to_page(pfn);
-			unsigned int mapcount;
-
-			/* TODO maybe return EBUSY at some point */
-			if (PageUnevictable(page)) {
-				/* pr_info("page %p unevictable", page); */
-				continue;
-			}
-
-			BUG_ON(!pte_none(*pte));
-			// pr_info("clear: addr: %lx -> %lu (%p) (none: %d)", addr, pfn, page, pte_none(*pte));
-			BUG_ON(!page);
-
-			list_add(&page->lru, &pages->list);
-			freed_pages ++;
-
-#ifdef MAPCOUNT
-			mapcount = atomic_add_negative(-1, &page->_mapcount);
-			BUG_ON(mapcount != 1); // Our pages are mapped exactly once
-
-			if (unlikely(page_mapcount(page) < 0)) {
-				pr_info("bad pte %p at %lx: %d", page, addr, page_mapcount(page));
-			}
-#endif
-		}
-		// FIXME: Guess: full=true
-		// FIXME: Is this duplicated?
-		// pte_clear_not_present_full(mm, addr, pte, true);
-	} while (pte++, addr += PAGE_SIZE, addr != end);
-
-	pages->count += freed_pages;
-
-	pte_unmap_unlock(start_pte, ptl);
-
-	return addr;
-}
-
-static inline unsigned long exmap_zap_pmd_range(
-												struct vm_area_struct *vma, pud_t *pud,
-												unsigned long addr, unsigned long end,
-												struct free_pages *pages)
-{
-	pmd_t *pmd;
-	unsigned long next;
-
-	// pr_info("PMD zap: 0x%lx-%lx", addr, end);
-	pmd = pmd_offset(pud, addr);
-	do {
-		next = pmd_addr_end(addr, end);
-		/*
-		 * Here there can be other concurrent MADV_DONTNEED or
-		 * trans huge page faults running, and if the pmd is
-		 * none or trans huge it can change under us. This is
-		 * because MADV_DONTNEED holds the mmap_lock in read
-		 * mode.
-		 */
-
-		/*
-		 * pmd_none_or_trans_huge_or_clear_bad was used, but
-		 * didnt work FOR SOME REASON
-		 */
-		if (pmd_none_or_clear_bad(pmd))
-			continue;
-		next = exmap_zap_pte_range(vma, pmd, addr, next, pages);
-	} while (pmd++, addr = next, addr != end);
-
-	return addr;
-}
-
-
-
-static inline unsigned long exmap_zap_pud_range(
-										  struct vm_area_struct *vma, p4d_t *p4d,
-										  unsigned long addr, unsigned long end,
-										  struct free_pages *pages)
-{
-	pud_t *pud;
-	unsigned long next;
-
-	// pr_info("PUD zap: 0x%lx-%lx", addr, end);
-
-	pud = pud_offset(p4d, addr);
-	do {
-		next = pud_addr_end(addr, end);
-		if (pud_none_or_clear_bad(pud))
-			continue;
-		next = exmap_zap_pmd_range(vma, pud, addr, next, pages);
-	} while (pud++, addr = next, addr != end);
-
-	return addr;
-}
-
-
-
-static inline unsigned long exmap_zap_p4d_range(
-												struct vm_area_struct *vma, pgd_t *pgd,
-												unsigned long addr, unsigned long end,
-												struct free_pages *pages)
-{
-	p4d_t *p4d;
-	unsigned long next;
-
-	//	pr_info("P4D zap: 0x%lx-%lx", addr, end);
-	p4d = p4d_offset(pgd, addr);
-	do {
-		next = p4d_addr_end(addr, end);
-		if (p4d_none_or_clear_bad(p4d))
-			continue;
-		next = exmap_zap_pud_range(vma, p4d, addr, next, pages);
-	} while (p4d++, addr = next, addr != end);
-
-	return addr;
-}
-
-
 static struct page*
 unmap_page_fastpath(pte_t *pte) {
-	int err;
-	struct page* page;
 	pte_t ptent, new_ptent;
 
 	ptent = ptep_get(pte);
@@ -644,13 +513,16 @@ unmap_page_fastpath(pte_t *pte) {
 		unsigned long pfn = pte_pfn(ptent);
 		struct page *page = pfn_to_page(pfn);
 
-		if (PageUnevictable(page))
+		if (unlikely(PageUnevictable(page)))
 			return NULL;
 
 		new_ptent = native_make_pte(0);
 
-		if (atomic_long_cmpxchg((atomic_long_t*) &(pte->pte), ptent.pte, new_ptent.pte) == ptent.pte)
-			return page;
+		if (unlikely(atomic_long_cmpxchg((atomic_long_t*) &(pte->pte),
+										 ptent.pte, new_ptent.pte) != ptent.pte)) {
+			return NULL;
+		}
+		return page;
 	}
 
 	return NULL;
@@ -658,12 +530,9 @@ unmap_page_fastpath(pte_t *pte) {
 
 
 
-/* insert_pages() amortizes the cost of spinlock operations
- * when inserting pages in a loop. Arch *must* define pte_index.
- */
 static int
 unmap_pages(struct vm_area_struct *vma, unsigned long addr, unsigned long num_pages,
-						struct free_pages *pages)
+						struct free_pages *free_pages)
 {
 	pgd_t *pgd = NULL;
 	p4d_t *p4d = NULL;
@@ -677,7 +546,7 @@ unmap_pages(struct vm_area_struct *vma, unsigned long addr, unsigned long num_pa
 
 more:
 	pgd = pgd_offset(mm, addr);
-	if (pgd_none(*pgd)) {
+	if (unlikely(pgd_none(*pgd))) {
 		new_addr = (addr + PGDIR_SIZE) & P4D_MASK;
 		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
 		if (remaining_pages_total <= skip_pages)
@@ -690,7 +559,7 @@ more:
 	}
 
 	p4d = p4d_offset(pgd, addr);
-	if (p4d_none(*p4d)) {
+	if (unlikely(p4d_none(*p4d))) {
 		new_addr = (addr + P4D_SIZE) & PUD_MASK;
 		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
 		if (remaining_pages_total <= skip_pages)
@@ -703,7 +572,7 @@ more:
 	}
 
 	pud = pud_offset(p4d, addr);
-	if (pud_none(*pud)) {
+	if (unlikely(pud_none(*pud))) {
 		new_addr = (addr + PUD_SIZE) & PMD_MASK;
 		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
 		if (remaining_pages_total <= skip_pages)
@@ -716,7 +585,7 @@ more:
 	}
 
 	pmd = pmd_offset(pud, addr);
-	if (pmd_none(*pmd)) {
+	if (unlikely(pmd_none(*pmd))) {
 		new_addr = (addr + PMD_SIZE) & PAGE_MASK;
 		skip_pages = (new_addr - addr) >> PAGE_SHIFT;
 		if (remaining_pages_total <= skip_pages)
@@ -735,23 +604,21 @@ more:
 		int pte_idx = 0;
 		const int batch_size = pages_to_write_in_pmd; //min_t(int, pages_to_write_in_pmd, 8);
 
-#ifdef USE_FASTPATH
 		if (pages_to_write_in_pmd == 1) {
 			struct page *page;
 
 			pte = pte_offset_map(pmd, addr);
 			page = unmap_page_fastpath(pte);
 
-			if (page) {
-				list_add(&page->lru, &pages->list);
-				pages->count ++;
+			if (page && free_pages) {
+				push_page(page, free_pages->bundle, free_pages->ctx->memory_pool);
+				free_pages->count ++;
 			}
 
 			remaining_pages_total -=1;
 			addr += PAGE_SIZE;
 			break;
 		}
-#endif
 
 		start_pte = pte_offset_map_lock(mm, pmd, addr, &pte_lock);
 		for (pte = start_pte; pte_idx < batch_size; ++pte, ++pte_idx) {
@@ -772,17 +639,11 @@ more:
 				//    pages->count);
 				BUG_ON(!page);
 
-				list_add(&page->lru, &pages->list);
-				pages->count ++;
-
-#ifdef MAPCOUNT
-				mapcount = atomic_add_negative(-1, &page->_mapcount);
-				BUG_ON(mapcount != 1); // Our pages are mapped exactly once
-
-				if (unlikely(page_mapcount(page) < 0)) {
-					pr_info("bad pte %p at %lx: %d", page, addr, page_mapcount(page));
+				if (free_pages) {
+					push_page(page, free_pages->bundle, free_pages->ctx->memory_pool);
+					free_pages->count ++;
 				}
-#endif
+
 			}
 
 			addr += PAGE_SIZE;
@@ -804,8 +665,6 @@ int exmap_unmap_pages( struct vm_area_struct *vma,
 					  struct free_pages *pages)
 {
 	const unsigned long end = addr + (num_pages * PAGE_SIZE);
-	pgd_t *pgd;
-	unsigned long next;
 
 	if (addr < vma->vm_start || end > vma->vm_end)
 		return -EFAULT;
@@ -816,19 +675,6 @@ int exmap_unmap_pages( struct vm_area_struct *vma,
 		return 0;
 	}
 
-#if 0 // Old and a little slower
-	pgd = pgd_offset(vma->vm_mm, addr);
-	do {
-		next = pgd_addr_end(addr, end);
-		if (pgd_none_or_clear_bad(pgd))
-			continue;
-		next = exmap_zap_p4d_range(vma, pgd, addr, next, pages);
-	} while (pgd++, addr = next, addr != end);
-
-	return 0;
-#else
 	return unmap_pages(vma, addr, num_pages, pages);
-#endif
-
 }
 

@@ -2,8 +2,8 @@ all: modules
 
 KDIR ?= /lib/modules/`uname -r`/build
 
-obj-m = exmap.o
-exmap-m = driver.o memory.o ksyms.o
+obj-m = memory_pool.o
+memory_pool-m = driver.o ksyms.o
 ccflags-y += -g 
 
 kbuild = -C $(KDIR) M=$$PWD $@

@@ -76,13 +76,15 @@ int main() {
 	}
 
 
-	int baking_fd = open("/dev/nullb0", O_RDWR|O_DIRECT);
-    if (baking_fd < 0) die("open");
+	int backing_fd = open("/dev/nullb0", O_RDWR|O_DIRECT);
+    if (backing_fd < 0) die("open");
 	
     int fd = open("/dev/exmap", O_RDWR);
     if (fd < 0) die("open");
 
-	const size_t MAP_SIZE = thread_count * 8 * 1024 * 1024;
+	const size_t MEMORY_POOL_PAGES = (1024 * 1024 * 1024) >> 12;
+	const size_t SPREAD = 10;
+	const size_t MAP_SIZE = MEMORY_POOL_PAGES * SPREAD * PAGE_SIZE;
 	char *map = (char*) mmap(NULL, MAP_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
 	if (map == MAP_FAILED) die("mmap");
 
@@ -96,9 +98,10 @@ int main() {
 	assert(tmp == MAP_FAILED && errno == EBUSY);
 
 	struct exmap_ioctl_setup buffer;
-	buffer.fd             = baking_fd; // Not baked by a file
+	buffer.fd             = backing_fd; // Backed by a file
 	buffer.max_interfaces = thread_count;
-	buffer.buffer_size    = thread_count * 2 * 512;
+	buffer.buffer_size    = MEMORY_POOL_PAGES;
+	buffer.flags          = 0;
 	if (ioctl(fd, EXMAP_IOCTL_SETUP, &buffer) < 0) {
 		perror("ioctl: exmap_setup");
 		return 0;
@@ -134,7 +137,7 @@ int main() {
 					}
 
 					for (unsigned i = 0; i < count ; i++) {
-						rc = pread(baking_fd, vec[i].iov_base, vec[i].iov_len,
+						rc = pread(backing_fd, vec[i].iov_base, vec[i].iov_len,
 							  (uintptr_t)vec[i].iov_base - (uintptr_t)map);
 						if (rc < 0) exit(rc);
 					}

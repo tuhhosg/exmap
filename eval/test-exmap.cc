@@ -39,15 +39,17 @@ int main() {
 	SUCC("1. Opened /dev/exmap.");
 
 	// Try to mmap the exmap
-	const size_t exmap_size = thread_count * 8 * 1024 * 1024;
-	exmap = static_cast<char*>(mmap(NULL, exmap_size, PROT_READ|PROT_WRITE, MAP_SHARED, exmap_fd, 0));
+	const size_t MEMORY_POOL_PAGES = (1024 * 1024 * 1024) >> 12;
+	const size_t SPREAD = 10;
+	const size_t MAP_SIZE = MEMORY_POOL_PAGES * SPREAD * PAGE_SIZE;
+	exmap = static_cast<char*>(mmap(NULL, MAP_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, exmap_fd, 0));
 	if (exmap == MAP_FAILED) {
 		PERR("exmap mmap");
 	}
 	SUCC("2. Made exmap visible in memory with mmap.");
 
 	// Try to mmap the exmap again (must fail)
-	void* tmp = mmap(NULL, exmap_size, PROT_READ|PROT_WRITE, MAP_SHARED, exmap_fd, 0);
+	void* tmp = mmap(NULL, MAP_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, exmap_fd, 0);
 	if (tmp != MAP_FAILED || errno != EBUSY) {
 		QUIT("Second exmap mmap should never work!");
 	}
@@ -56,7 +58,7 @@ int main() {
 	// Try to configure the exmap
 	setup.fd             = -1;
 	setup.max_interfaces = thread_count;
-	setup.buffer_size    = thread_count * 512;
+	setup.buffer_size    = MEMORY_POOL_PAGES;
 	if (ioctl(exmap_fd, EXMAP_IOCTL_SETUP, &setup) < 0) {
 		PERR("ioctl: exmap_setup");
 	}
