@@ -1,7 +1,6 @@
 #!/bin/bash
 
 cp -v module/linux/exmap.h /usr/include/linux
-# cp -v memory_pool/linux/memory_pool.h /usr/include/linux
 
 if lsmod | grep -q exmap; then rmmod exmap; fi
 if lsmod | grep -q memory_pool; then rmmod memory_pool; fi
