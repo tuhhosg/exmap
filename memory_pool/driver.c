@@ -3,7 +3,8 @@
 #include <linux/mm.h>
 #include <linux/vmalloc.h>
 
-#include "../memory_pool/memory_pool.h"
+#include "memory_pool.h"
+#include "ksyms.h"
 
 unsigned active_memory_pools;
 static struct memory_pool_ctx* MEMORY_POOLS[64];
@@ -243,10 +244,12 @@ struct memory_pool_ctx* memory_pool_create(struct memory_pool_setup* setup) {
 
 	size_t alloc_count = 0;
 
-	pr_info("memory_pool: init size (4K pages) = %ld\n", setup->pool_size);
+	pr_info("memory_pool: init size (4K pages) = %ld (flags = %u)\n", setup->pool_size, setup->flags);
 
 	/* TODO: checks? */
 	ctx->pool_size = setup->pool_size;
+
+	ctx->flags = setup->flags;
 
 	// // Account for the locked memory
 	// rc = pool_account_mem(ctx, pool_size);
@@ -262,16 +265,42 @@ struct memory_pool_ctx* memory_pool_create(struct memory_pool_setup* setup) {
 	/* // Allocate Memory from the system */
 	/* add_mm_counter(current->mm, MM_FILEPAGES, ctx->buffer_size); */
 
-	
-	while (alloc_count < ctx->pool_size) {
-		struct page* page = alloc_page_system();
-		if (!page) {
-			pr_err("pre alloc failed at count %lu of %lu\n",
-					alloc_count, ctx->pool_size);
-			break;
+	if (setup->flags & BACKING_VM_CONTIGUOUS) {
+		struct page* pages;
+		unsigned long start, end, addr;
+		pages = alloc_contig_pages(ctx->pool_size, GFP_KERNEL, first_online_node, NULL);
+		if (!pages) {
+			pr_err("failed to allocate %lx contiguous pages\n", ctx->pool_size);
+			return NULL;
 		}
-		push_page(page, &ctx->pool_bundle, ctx);
-		alloc_count++;
+
+		start = (unsigned long) page_to_virt(pages);
+		ctx->start = start;
+		end = start + PAGE_SIZE * ctx->pool_size;
+		pr_info("memory_pool: contiguous mem %lx..%lx with %lu pages\n",
+				start, end, ctx->pool_size);
+
+		for (addr = start; addr < end; addr += PAGE_SIZE) {
+			struct page* page = virt_to_page(addr);
+			if (!page) {
+				pr_err("contig pre alloc failed at addr %lx (range %lx..%lx, first pagep %lx)\n",
+					   addr, start, end, (unsigned long) pages);
+				break;
+			}
+			push_page(page, &ctx->pool_bundle, ctx);
+			alloc_count++;
+		}
+	} else {
+		while (alloc_count < ctx->pool_size) {
+			struct page* page = alloc_page_system();
+			if (!page) {
+				pr_err("pre alloc failed at count %lu of %lu\n",
+						alloc_count, ctx->pool_size);
+				break;
+			}
+			push_page(page, &ctx->pool_bundle, ctx);
+			alloc_count++;
+		}
 	}
 
 	/* TODO: add huge page support flag (and say it's unimplemented) */
@@ -317,7 +346,7 @@ void memory_pool_destroy(struct memory_pool_ctx* ctx) {
 	MEMORY_POOLS[active_memory_pools] = NULL;
 	active_memory_pools--;
 
-	pr_info("memory_pool: freed %d with %lu pages\n", active_memory_pools, freed_pages);
+	pr_info("memory_pool: destroyed %d, freed %lu pages\n", active_memory_pools + 1, freed_pages);
 
 	vfree(ctx);
 }
@@ -325,6 +354,8 @@ EXPORT_SYMBOL(memory_pool_destroy);
 
 static int memory_pool_init_module(void) {
 	active_memory_pools = 0;
+
+	acquire_ksyms();
 
 	pr_info("memory_pool module loaded\n");
 
