@@ -39,9 +39,9 @@ int main() {
 	SUCC("1. Opened /dev/exmap.");
 
 	// Try to mmap the exmap
-	const size_t MEMORY_POOL_SIZE = (1024 * 1024 * 1024) >> 12;
+	const size_t MEMORY_POOL_PAGES = (1024 * 1024 * 1024) >> 12;
 	const size_t SPREAD = 10;
-	const size_t MAP_SIZE = MEMORY_POOL_SIZE * SPREAD * PAGE_SIZE;
+	const size_t MAP_SIZE = MEMORY_POOL_PAGES * SPREAD * PAGE_SIZE;
 	exmap = static_cast<char*>(mmap(NULL, MAP_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED, exmap_fd, 0));
 	if (exmap == MAP_FAILED) {
 		PERR("exmap mmap");
@@ -58,7 +58,7 @@ int main() {
 	// Try to configure the exmap
 	setup.fd             = -1;
 	setup.max_interfaces = thread_count;
-	setup.buffer_size    = MEMORY_POOL_SIZE;
+	setup.buffer_size    = MEMORY_POOL_PAGES;
 	if (ioctl(exmap_fd, EXMAP_IOCTL_SETUP, &setup) < 0) {
 		PERR("ioctl: exmap_setup");
 	}

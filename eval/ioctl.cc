@@ -109,7 +109,7 @@ int main() {
     assert(tmp == MAP_FAILED && errno == EBUSY);
 
     struct exmap_ioctl_setup buffer;
-    buffer.fd             = -1; // Not baked by a file
+    buffer.fd             = -1; // Not backed by a file
     buffer.max_interfaces = thread_count;
     buffer.buffer_size    = 1024 * 8;
     if (ioctl(fd, EXMAP_IOCTL_SETUP, &buffer) < 0) {

@@ -30,7 +30,7 @@ struct exmap_ctx {
 	/* Here is the ptexport buffer located */
 	struct vm_area_struct *ptexport_vma;
 
-	/* The baking storage */
+	/* The backing storage */
 	struct file *file_backend;
 	struct block_device *bdev;
 
