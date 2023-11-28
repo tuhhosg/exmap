@@ -293,9 +293,6 @@ void mm_trace_rss_stat(struct mm_struct *mm, int member, long count)
 static int insert_page_into_pte_locked(struct mm_struct *mm, pte_t *pte,
 									   unsigned long addr, struct page *page, pgprot_t prot)
 {
-#ifdef MAPCOUNT
-	unsigned int mapcount;
-#endif
 	/* pr_info("pte_none = %d, page dirty = %d, pte = %p, page = %p", !(pte->pte & ~(_PAGE_DIRTY | _PAGE_ACCESSED)), PageDirty(page), pte, page); */
 	/* NOTE this causes EBUSY in insert_pages */
 	if (!pte_none(*pte))
@@ -303,11 +300,6 @@ static int insert_page_into_pte_locked(struct mm_struct *mm, pte_t *pte,
 	/* Ok, finally just insert the thing.. */
 
 	// add_mm_counter_fast(mm, mm_counter_file(page), 1);
-
-#ifdef MAPCOUNT
-	mapcount = atomic_inc_and_test(&page->_mapcount);
-	BUG_ON(mapcount != 1);
-#endif
 
 	set_pte_at(mm, addr, pte, mk_pte(page, prot));
 	return 0;
@@ -652,14 +644,6 @@ more:
 					free_pages->count ++;
 				}
 
-#ifdef MAPCOUNT
-				mapcount = atomic_add_negative(-1, &page->_mapcount);
-				BUG_ON(mapcount != 1); // Our pages are mapped exactly once
-
-				if (unlikely(page_mapcount(page) < 0)) {
-					pr_info("bad pte %p at %lx: %d", page, addr, page_mapcount(page));
-				}
-#endif
 			}
 
 			addr += PAGE_SIZE;

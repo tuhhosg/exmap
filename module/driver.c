@@ -35,7 +35,6 @@
 
 
 #include "linux/exmap.h"
-#include "exmap_common.h"
 #include "driver.h"
 #include "ksyms.h"
 

@@ -40,11 +40,6 @@ struct exmap_iov {
 			int32_t   res;
 			int16_t   pages;
 		};
-		/* struct { */
-		/* 	int16_t victim; */
-		/* 	int16_t robber; */
-		/* 	uint32_t count; */
-		/* }; */
 	};
 };
 

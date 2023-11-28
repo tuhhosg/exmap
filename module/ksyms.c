@@ -17,8 +17,8 @@ static void (*flush_tlb_mm_range_ksym)(struct mm_struct *mm, unsigned long start
 								unsigned long end, unsigned int stride_shift,
 								bool freed_tables);
 
-static ssize_t (*vfs_read_ksym)(struct file *file, char __user *buf,
-						 size_t count, loff_t *pos);
+/* static ssize_t (*vfs_read_ksym)(struct file *file, char __user *buf, */
+/* 						 size_t count, loff_t *pos); */
 
 static void (*iov_iter_restore_ksym)(struct iov_iter *i, struct iov_iter_state *state);
 
@@ -47,10 +47,6 @@ int exmap_acquire_ksyms(void)
 	if(!flush_tlb_mm_range_ksym)
 		return -1;
 
-	vfs_read_ksym = (void *)kallsyms_lookup_name("vfs_read");
-	if(!vfs_read_ksym)
-		return -1;
-
 	iov_iter_restore_ksym = (void *)kallsyms_lookup_name("iov_iter_restore");
 	if(!iov_iter_restore_ksym)
 		return -1;
@@ -67,12 +63,6 @@ void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 						bool freed_tables)
 {
 	flush_tlb_mm_range_ksym(mm, start, end, stride_shift, freed_tables);
-}
-
-ssize_t vfs_read(struct file *file, char __user *buf, 
-				 size_t count, loff_t *pos)
-{
-	return vfs_read_ksym(file, buf, count, pos);
 }
 
 void iov_iter_restore(struct iov_iter *i, struct iov_iter_state *state)

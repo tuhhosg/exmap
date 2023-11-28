@@ -1,4 +1,4 @@
-all: modules eval #module memory_pool
+all: modules eval
 
 KDIR ?= /lib/modules/`uname -r`/build
 
@@ -14,13 +14,7 @@ clean:
 	make -C module/ clean
 	make -C memory_pool/ clean
 
-# module:
-# 	make -C module/
-
-# memory_pool:
-# 	make -C memory_pool/
-
 eval:
 	make -C eval/
 
-.PHONY: eval #module memory_pool
+.PHONY: eval
