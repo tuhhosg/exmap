@@ -46,6 +46,10 @@ static struct class *cl; // Global variable for the device class
 #define EXMAP_FLAGS_PAGEFAULT_ALLOC (1 << 1) // Alloc new memory on a page fault
 #define EXMAP_FLAGS_STEAL (1 << 2) // Alloc new memory on a page fault
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+#define pte_offset_map pte_offset_kernel
+#endif
+
 
 static inline
 struct exmap_ctx * exmap_from_file(struct file *file) {
@@ -130,7 +134,7 @@ static vm_fault_t pt_export_vm_fault(struct vm_fault *vmf) {
 		free_pages.count++;
 		rc = exmap_insert_pages(vma, vmf->address, 1, &free_pages, NULL,NULL);
 		BUG_ON(rc != 0);
-		
+
 		//pr_info("ptexport/vm_fault: ptexport: %lx\n", pte_val(*ptexport_pte));
 		ret = VM_FAULT_NOPAGE;
 	}
@@ -174,13 +178,21 @@ static int pt_export_mmap(struct exmap_ctx *ctx, struct vm_area_struct *vma) {
 	pt_export_max = (ex_end_pfn - ex_start_pfn) * sizeof(pteval_t);
 	if ((vma->vm_end - vma->vm_start) > pt_export_max)
 		return -EOVERFLOW;
-	
+
 	pr_info("pt_export: exmap(%lx + %lx pages), will export %ld page tables\n",
 			ctx->exmap_vma->vm_start, ex_end_pfn - ex_start_pfn,
 			(vma->vm_end - vma->vm_start) >> PAGE_SHIFT);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	vm_flags_set(vma, VM_DONTEXPAND);
+	vm_flags_set(vma, VM_DONTDUMP);
+	vm_flags_set(vma, VM_NOHUGEPAGE);
+	vm_flags_set(vma, VM_DONTCOPY);
+	vm_flags_set(vma, VM_MIXEDMAP);
+#else
 	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP | VM_NOHUGEPAGE | VM_DONTCOPY;
 	vma->vm_flags |= VM_MIXEDMAP;
+#endif
 	vma->vm_private_data = ctx;
 	vma->vm_ops = &pt_export_vm_ops;
 	vma->vm_private_data = ctx;
@@ -238,7 +250,7 @@ static vm_fault_t exmap_vm_fault(struct vm_fault *vmf) {
 
 		rc = exmap_insert_pages(vma, (uintptr_t) vmf->address,
 								1, &free_pages, NULL,NULL);
-		if (rc < 0) {	
+		if (rc < 0) {
 			pr_info("insert failed: %d\n", rc);
 			goto out;
 		}
@@ -329,13 +341,24 @@ static void exmap_notifier_release(struct mmu_notifier *mn,
 static int exmap_notifier_invalidate_range_start(struct mmu_notifier *mn, const struct mmu_notifier_range *range) {
 	struct exmap_ctx *ctx = mmu_notifier_to_exmap(mn);
 
-    // Only cleanup the exmap_vma when it is the one being unmapped
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	struct vm_area_struct *vma;
+	vma = find_vma_intersection(range->mm, range->start, range->end);
+	if (ctx->interfaces && ctx->exmap_vma && ctx->exmap_vma == vma) {
+		exmap_vma_cleanup(ctx, range->start, range->end);
+	}
+	if (ctx->ptexport_vma && ctx->ptexport_vma == vma) {
+		ptexport_vma_cleanup(ctx);
+	}
+#else
+	// Only cleanup the exmap_vma when it is the one being unmapped
 	if (ctx->interfaces && ctx->exmap_vma && ctx->exmap_vma == range->vma) {
 		exmap_vma_cleanup(ctx, range->start, range->end);
 	}
 	if (ctx->ptexport_vma && ctx->ptexport_vma == range->vma) {
 		ptexport_vma_cleanup(ctx);
 	}
+#endif
 	return 0;
 }
 
@@ -371,8 +394,16 @@ static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
 		}
 
 		vma->vm_ops   = &vm_ops;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	vm_flags_set(vma, VM_DONTEXPAND);
+	vm_flags_set(vma, VM_DONTDUMP);
+	vm_flags_set(vma, VM_NOHUGEPAGE);
+	vm_flags_set(vma, VM_DONTCOPY);
+	vm_flags_set(vma, VM_MIXEDMAP);
+#else
 		vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP | VM_NOHUGEPAGE | VM_DONTCOPY;
 		vma->vm_flags |= VM_MIXEDMAP; // required for vm_insert_page
+#endif
 		vma->vm_private_data = ctx;
 		vm_open(vma);
 		ctx->exmap_vma = vma;
@@ -784,7 +815,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		if (setup.fd >= 0) {
 			struct file *file = fget(setup.fd);
 			struct inode *inode;
-			
+
 			if (!file) goto out_fput;
 
 			if (!(file->f_flags & O_DIRECT)) {
@@ -894,7 +925,7 @@ static long exmap_ioctl (struct file *file, unsigned int cmd, unsigned long arg)
 		struct file *other_file = fget(arg);
 		struct exmap_ctx *other_ctx;
 		if (!other_file) return -EBADFD;
-		
+
 		if (file->f_op != other_file->f_op) {
 			fput(other_file);
 			return -EINVAL; // Other file is not an exmap
@@ -959,7 +990,7 @@ static bool validate_surface(struct exmap_ctx *ctx, char __user* addr, ssize_t s
 		return -EINVAL;
 	}
 	if (((uintptr_t) addr) & ~PAGE_MASK) // Not aligned start
-	{ 
+	{
 		pr_info("addr");
 		return -EINVAL;
 	}
@@ -1031,25 +1062,30 @@ ssize_t exmap_read_iter(struct kiocb* kiocb, struct iov_iter *iter) {
 			addr = iter->ubuf;
 			size = iov_iter_count(iter);
 		} else {
-			struct iovec iovec;
 			BUG_ON(!iter_is_iovec(iter));
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+			addr = iter_iov_addr(iter);
+			size = iter_iov_len(iter);
+#else
+			struct iovec iovec;
 			iovec = iov_iter_iovec(iter);
 			addr = iovec.iov_base;
 			size = iovec.iov_len;
+#endif
 		}
-		
+
 		disk_offset = (uintptr_t)addr - ctx->exmap_vma->vm_start;
 		pages_should = size >> PAGE_SHIFT;
 
 		//pr_info("exmap: read  @ interface %d: %lu+%lu pages\n", interface - ctx->interfaces,
 		//		disk_offset, pages_should);
-		
+
 		// Validate that the IO Vector is in our exmap range
 		rc = validate_surface(ctx, addr, size);
 		if (rc < 0) { rc_all = rc; goto out; }
 
 		BUG_ON(free_pages.count < pages_should);
-		
+
 		// Insert memory in that range
 		pages_before = free_pages.count;
 		rc = exmap_insert_pages(ctx->exmap_vma, (uintptr_t) addr,
@@ -1107,7 +1143,11 @@ int exmap_uring_cmd(struct io_uring_cmd *ioucmd, unsigned int issue_flags) {
 	int rc = -EINVAL;
 	struct file *file = ioucmd->file;
 	struct exmap_ctx *ctx = exmap_from_file(file);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	struct exmap_uring_cmd *cmd = (struct exmap_uring_cmd *)io_uring_sqe_cmd(ioucmd->sqe);
+#else
 	struct exmap_uring_cmd *cmd = (struct exmap_uring_cmd *)ioucmd->cmd;
+#endif
 	unsigned int iface_id = ioucmd->cmd_op & 0xff;
 	unsigned int action = (ioucmd->cmd_op >> 8) & 0xff;
 	struct exmap_interface *interface = &(ctx->interfaces[iface_id]);
@@ -1221,15 +1261,21 @@ asmlinkage ssize_t sys_exmap_action(struct pt_regs *regs) {
 
  out_fput:
 	fput(file);
-	
+
  out_return:
 	return rc;
 }
 
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
+static int dev_uevent_perms(const struct device *dev, struct kobj_uevent_env *env) {
+	return add_uevent_var(env, "DEVMODE=%#o", 0666);
+}
+#else
 static int dev_uevent_perms(struct device *dev, struct kobj_uevent_env *env) {
 	return add_uevent_var(env, "DEVMODE=%#o", 0666);
 }
+#endif
 
 static uintptr_t orig_syscall_400;
 
@@ -1243,14 +1289,19 @@ static inline void custom_write_cr0(unsigned long val)
 
 static int exmap_init_module(void) {
 	unsigned long cr0;
-	
+
 	if (exmap_acquire_ksyms())
 		goto out;
 
 	if (alloc_chrdev_region(&first, 0, 1, "exmap") < 0)
 		goto out;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+	if ((cl = class_create("exmap")) == NULL)
+		goto out_unregister_chrdev_region;
+#else
 	if ((cl = class_create(THIS_MODULE, "exmap")) == NULL)
 		goto out_unregister_chrdev_region;
+#endif
 	cl->dev_uevent = dev_uevent_perms;
 	if (device_create(cl, NULL, first, NULL, "exmap") == NULL)
 		goto out_class_destroy;
@@ -1285,7 +1336,7 @@ static int exmap_init_module(void) {
 
 static void exmap_cleanup_module(void) {
 	unsigned long cr0;
-	
+
 	cdev_del(&cdev);
 	device_destroy(cl, first);
 	class_destroy(cl);
@@ -1294,14 +1345,14 @@ static void exmap_cleanup_module(void) {
 	/* disable write protection */
     cr0 = read_cr0();
     custom_write_cr0(cr0 & ~WP_MASK);
-	
+
 	// Restore syscall
 	if (orig_syscall_400 && sys_call_table_ptr)
 		sys_call_table_ptr[SYS_EXMAP_ACTION] = orig_syscall_400;
 
 	/* re-enable write protection */
     custom_write_cr0(cr0);
-	
+
 	printk(KERN_INFO "exmap unregistered");
 }
 

@@ -24,3 +24,5 @@ modules.builtin
 *.gcno
 
 Module.symvers
+
+/eval/test-*

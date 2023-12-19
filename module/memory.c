@@ -4,8 +4,21 @@
 #include <asm/pgalloc.h>
 #include <asm/cacheflush.h>
 #include <linux/memcontrol.h>
+#include <linux/version.h>
 
 #include "driver.h"
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+#define pte_offset_map pte_offset_kernel
+#define pte_offset_map_lock(mm, pmd, address, ptlp)	\
+({							\
+	spinlock_t *__ptl = pte_lockptr(mm, pmd);	\
+	pte_t *__pte = pte_offset_kernel(pmd, address);	\
+	*(ptlp) = __ptl;				\
+	spin_lock(__ptl);				\
+	__pte;						\
+})
+#endif
 
 struct exmap_interface;
 
@@ -286,9 +299,15 @@ pmd_t * exmap_walk_to_pmd(struct vm_area_struct *vma, unsigned long addr) {
 }
 
 // For add_mm_counter to work inside a module
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
+void mm_trace_rss_stat(struct mm_struct *mm, int member)
+{
+}
+#else
 void mm_trace_rss_stat(struct mm_struct *mm, int member, long count)
 {
 }
+#endif
 
 static int insert_page_into_pte_locked(struct mm_struct *mm, pte_t *pte,
 									   unsigned long addr, struct page *page, pgprot_t prot)
@@ -332,7 +351,7 @@ static int insert_page_in_batch_locked(struct mm_struct *mm, pte_t *pte,
 static int insert_page_fastpath(pte_t *pte, unsigned long addr, struct page *page, pgprot_t prot) {
 	int err = 0;
 	pte_t ptent, new_ptent;
-	
+
 	ptent = ptep_get(pte);
 	if (pte_present(ptent))
 		return -EBUSY;
@@ -458,7 +477,11 @@ int exmap_insert_pages(struct vm_area_struct *vma, unsigned long addr,
 	if (!(vma->vm_flags & VM_MIXEDMAP)) {
 		BUG_ON(mmap_read_trylock(vma->vm_mm));
 		BUG_ON(vma->vm_flags & VM_PFNMAP);
-		vma->vm_flags |= VM_MIXEDMAP;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+	vm_flags_set(vma, VM_MIXEDMAP);
+#else
+	vma->vm_flags |= VM_MIXEDMAP;
+#endif
 	}
 	/* Defer page refcount checking till we're about to map that page. */
 	return insert_pages(vma, addr, num_pages, pages,
@@ -626,7 +649,6 @@ more:
 			if (pte_present(ptent)) {
 				unsigned long pfn = pte_pfn(ptent);
 				struct page *page = pfn_to_page(pfn);
-				unsigned int mapcount;
 
 				/* TODO maybe return EBUSY at some point */
 				if (PageUnevictable(page)) {
