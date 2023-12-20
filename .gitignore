@@ -26,3 +26,4 @@ modules.builtin
 Module.symvers
 
 /eval/test-*
+!/eval/*.cc

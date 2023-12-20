@@ -395,11 +395,11 @@ static int exmap_mmap(struct file *file, struct vm_area_struct *vma) {
 
 		vma->vm_ops   = &vm_ops;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
-	vm_flags_set(vma, VM_DONTEXPAND);
-	vm_flags_set(vma, VM_DONTDUMP);
-	vm_flags_set(vma, VM_NOHUGEPAGE);
-	vm_flags_set(vma, VM_DONTCOPY);
-	vm_flags_set(vma, VM_MIXEDMAP);
+		vm_flags_set(vma, VM_DONTEXPAND);
+		vm_flags_set(vma, VM_DONTDUMP);
+		vm_flags_set(vma, VM_NOHUGEPAGE);
+		vm_flags_set(vma, VM_DONTCOPY);
+		vm_flags_set(vma, VM_MIXEDMAP);
 #else
 		vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP | VM_NOHUGEPAGE | VM_DONTCOPY;
 		vma->vm_flags |= VM_MIXEDMAP; // required for vm_insert_page
