@@ -41,7 +41,11 @@ static inline pgtable_t exmap_pte_alloc_one(struct mm_struct *mm)
 	pte = alloc_page(GFP_PGTABLE_USER);
 	if (!pte)
 		return NULL;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+	if (!pagetable_pte_ctor(page_ptdesc(pte))) {
+#else
 	if (!pgtable_pte_page_ctor(pte)) {
+#endif
 		__free_page(pte);
 		return NULL;
 	}
@@ -107,7 +111,11 @@ static inline pmd_t *exmap_pmd_alloc_one(struct mm_struct *mm, unsigned long add
 	page = alloc_pages(GFP_PGTABLE_USER, 0);
 	if (!page)
 		return NULL;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+	if (!pagetable_pmd_ctor(page_ptdesc(page))) {
+#else
 	if (!pgtable_pmd_page_ctor(page)) {
+#endif
 		__free_pages(page, 0);
 		return NULL;
 	}
