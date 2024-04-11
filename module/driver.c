@@ -22,6 +22,9 @@
 #include <linux/io_uring.h>
 #include <linux/io_uring_types.h>
 #endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+#include <linux/io_uring/cmd.h>
+#endif
 
 #include <linux/pgtable.h>
 #include <asm/io.h>
